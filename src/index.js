@@ -36,6 +36,9 @@ import audiencesRoutes from './routes/audiences.js';
 import integrationsRoutes from './routes/integrations.js';
 import aiChatRoutes from './routes/ai-chat.js';
 import superAdminRoutes from './routes/super-admin.js';
+import appointmentsRoutes from './routes/appointments.js';
+import loyaltyRoutes from './routes/loyalty.js';
+import staffScheduleRoutes from './routes/staff-schedule.js';
 
 const app = express();
 
@@ -107,6 +110,9 @@ app.use('/api/inbox', inboxRoutes);
 app.use('/api/audiences', audiencesRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/ai', aiChatRoutes);
+app.use('/api/appointments', appointmentsRoutes);
+app.use('/api/loyalty', loyaltyRoutes);
+app.use('/api/staff-schedule', staffScheduleRoutes);
 
 // 404 handler
 app.use((req, res) => {

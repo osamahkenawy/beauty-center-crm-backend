@@ -82,6 +82,25 @@ npm run dev
 ### Stats
 - `GET /api/stats` - Get dashboard statistics
 
+### Appointments (Beauty Center)
+- `GET /api/appointments` - List appointments (with pagination and filters)
+- `POST /api/appointments` - Create appointment
+- `GET /api/appointments/:id` - Get appointment details
+- `PATCH /api/appointments/:id` - Update appointment
+- `DELETE /api/appointments/:id` - Delete appointment
+- `GET /api/appointments/staff/:staff_id/availability` - Get staff availability
+- `GET /api/appointments/dashboard/today` - Get today's appointments
+
+### Loyalty Program
+- `GET /api/loyalty` - List loyalty programs
+- `POST /api/loyalty` - Create loyalty program
+- `PATCH /api/loyalty/:id` - Update loyalty program
+
+### Staff Schedule
+- `GET /api/staff-schedule` - Get staff schedules
+- `POST /api/staff-schedule` - Create schedule
+- `PATCH /api/staff-schedule/:id` - Update schedule
+
 ## ⚙️ Configuration
 
 Edit `src/config.js` or create a `.env` file:

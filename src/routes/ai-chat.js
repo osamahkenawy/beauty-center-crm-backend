@@ -10,9 +10,11 @@ let openaiClient = null;
 
 function getOpenAIClient() {
   if (!process.env.OPENAI_API_KEY) {
+    console.log('[AI Chat] OPENAI_API_KEY not found in environment variables');
     return null;
   }
   if (!openaiClient) {
+    console.log('[AI Chat] Initializing OpenAI client with API key');
     openaiClient = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
@@ -419,6 +421,25 @@ router.get('/quick-stats', authMiddleware, async (req, res) => {
     console.error('Quick stats error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch stats' });
   }
+});
+
+// Debug endpoint to check OpenAI configuration
+router.get('/debug', authMiddleware, (req, res) => {
+  const hasKey = !!process.env.OPENAI_API_KEY;
+  const keyLength = process.env.OPENAI_API_KEY?.length || 0;
+  const keyPrefix = process.env.OPENAI_API_KEY?.substring(0, 10) || 'N/A';
+  const client = getOpenAIClient();
+  
+  res.json({
+    success: true,
+    debug: {
+      hasOpenAIKey: hasKey,
+      keyLength: keyLength,
+      keyPrefix: keyPrefix,
+      clientInitialized: !!client,
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+    }
+  });
 });
 
 export default router;
