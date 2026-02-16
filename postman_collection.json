@@ -1,0 +1,1467 @@
+{
+  "info": {
+    "name": "Trasealla Beauty Center CRM",
+    "description": "Complete API collection for Trasealla Beauty Center CRM Backend.\n\n## Authentication\n- Login with `POST /api/auth/login` to get a Bearer token\n- The token is auto-saved to `{{token}}` variable\n- All protected routes use `Authorization: Bearer {{token}}`\n\n## Multi-Tenancy\n- The `tenant_id` is embedded in the JWT token\n- Super admin routes use a separate token `{{super_admin_token}}`\n\n## Demo Credentials\n- **Tenant Admin**: username=`admin`, password=`Trasealla123`\n- **Super Admin**: username=`trasealla_admin`, password=`Trasealla@2025!`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "trasealla"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:4000", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "super_admin_token", "value": "", "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "🏥 Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/health", "host": ["{{base_url}}"], "path": ["api", "health"] },
+            "auth": { "type": "noauth" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🔐 Auth",
+      "description": "Authentication endpoints — login, logout, session, change password",
+      "item": [
+        {
+          "name": "Login (Tenant Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.token) { pm.collectionVariables.set('token', res.token); }",
+                  "if (res.data && res.data.token) { pm.collectionVariables.set('token', res.data.token); }",
+                  "pm.test('Login successful', function() { pm.response.to.have.status(200); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"Trasealla123\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/auth/login", "host": ["{{base_url}}"], "path": ["api", "auth", "login"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Session",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/auth/session", "host": ["{{base_url}}"], "path": ["api", "auth", "session"] }
+          }
+        },
+        {
+          "name": "Change Password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"current_password\": \"Trasealla123\",\n  \"new_password\": \"NewPassword123\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/auth/change-password", "host": ["{{base_url}}"], "path": ["api", "auth", "change-password"] }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/auth/logout", "host": ["{{base_url}}"], "path": ["api", "auth", "logout"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🛡️ Super Admin",
+      "description": "Platform-level management for Trasealla owners",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.token) { pm.collectionVariables.set('super_admin_token', res.token); }",
+                  "pm.test('Super admin login successful', function() { pm.response.to.have.status(200); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"trasealla_admin\",\n  \"password\": \"Trasealla@2025!\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/super-admin/login", "host": ["{{base_url}}"], "path": ["api", "super-admin", "login"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Session",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/session", "host": ["{{base_url}}"], "path": ["api", "super-admin", "session"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Platform Stats",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/stats", "host": ["{{base_url}}"], "path": ["api", "super-admin", "stats"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "List All Tenants",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Tenant by ID",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Update Tenant",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Updated Beauty Center\",\n  \"email\": \"updated@beauty.com\"\n}" },
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Toggle Tenant Status",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1/toggle-status", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1", "toggle-status"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Set Max Users",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"max_users\": 25\n}" },
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1/max-users", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1", "max-users"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Update Modules",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "body": { "mode": "raw", "raw": "{\n  \"modules\": [\"crm\", \"appointments\", \"loyalty\", \"invoicing\"]\n}" },
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1/modules", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1", "modules"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Available Modules",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/modules", "host": ["{{base_url}}"], "path": ["api", "super-admin", "modules"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Tenant Usage",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1/usage", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1", "usage"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Impersonate Tenant",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{super_admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/super-admin/tenants/1/impersonate", "host": ["{{base_url}}"], "path": ["api", "super-admin", "tenants", "1", "impersonate"] },
+            "auth": { "type": "noauth" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🏢 Tenants",
+      "description": "Tenant registration, management, and licensing",
+      "item": [
+        {
+          "name": "Register New Tenant",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company_name\": \"New Beauty Salon\",\n  \"email\": \"owner@newsalon.com\",\n  \"password\": \"SecurePass123\",\n  \"full_name\": \"Salon Owner\",\n  \"phone\": \"+971501234567\",\n  \"industry\": \"beauty\",\n  \"plan\": \"trial\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/tenants/register", "host": ["{{base_url}}"], "path": ["api", "tenants", "register"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Check Availability",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/tenants/check-availability?slug=new-beauty-salon",
+              "host": ["{{base_url}}"],
+              "path": ["api", "tenants", "check-availability"],
+              "query": [{ "key": "slug", "value": "new-beauty-salon" }]
+            },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Get Current Tenant",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/tenants/current", "host": ["{{base_url}}"], "path": ["api", "tenants", "current"] }
+          }
+        },
+        {
+          "name": "Update Current Tenant",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"My Beauty Center Updated\",\n  \"phone\": \"+971509876543\"\n}" },
+            "url": { "raw": "{{base_url}}/api/tenants/current", "host": ["{{base_url}}"], "path": ["api", "tenants", "current"] }
+          }
+        },
+        {
+          "name": "Get Subscription",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/tenants/subscription", "host": ["{{base_url}}"], "path": ["api", "tenants", "subscription"] }
+          }
+        },
+        {
+          "name": "Get Usage Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/tenants/usage", "host": ["{{base_url}}"], "path": ["api", "tenants", "usage"] }
+          }
+        },
+        {
+          "name": "Validate License",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"license_key\": \"YOUR-LICENSE-KEY\"\n}" },
+            "url": { "raw": "{{base_url}}/api/tenants/licenses/validate", "host": ["{{base_url}}"], "path": ["api", "tenants", "licenses", "validate"] },
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "Activate License",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"license_key\": \"YOUR-LICENSE-KEY\",\n  \"company_name\": \"My Company\",\n  \"email\": \"me@company.com\",\n  \"password\": \"pass123\"\n}" },
+            "url": { "raw": "{{base_url}}/api/tenants/licenses/activate", "host": ["{{base_url}}"], "path": ["api", "tenants", "licenses", "activate"] },
+            "auth": { "type": "noauth" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "✂️ Services (Products)",
+      "description": "CRUD for salon services — multi-tenant, category-aware",
+      "item": [
+        {
+          "name": "Get Stats Summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/products/stats/summary", "host": ["{{base_url}}"], "path": ["api", "products", "stats", "summary"] }
+          }
+        },
+        {
+          "name": "List All Services",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/products", "host": ["{{base_url}}"], "path": ["api", "products"] }
+          }
+        },
+        {
+          "name": "List Services (with filters)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/products?search=hair&category_id=1&active=true",
+              "host": ["{{base_url}}"],
+              "path": ["api", "products"],
+              "query": [
+                { "key": "search", "value": "hair" },
+                { "key": "category_id", "value": "1" },
+                { "key": "active", "value": "true" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Service by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/products/1", "host": ["{{base_url}}"], "path": ["api", "products", "1"] }
+          }
+        },
+        {
+          "name": "Create Service",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Haircut & Blowdry\",\n  \"description\": \"Classic haircut with professional blowdry styling\",\n  \"unit_price\": 150,\n  \"currency\": \"AED\",\n  \"duration\": 45,\n  \"category_id\": 1,\n  \"category\": \"Hair\",\n  \"sku\": \"HAIR-001\",\n  \"is_active\": true\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/products", "host": ["{{base_url}}"], "path": ["api", "products"] }
+          }
+        },
+        {
+          "name": "Update Service",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Premium Haircut & Styling\",\n  \"unit_price\": 200,\n  \"duration\": 60\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/products/1", "host": ["{{base_url}}"], "path": ["api", "products", "1"] }
+          }
+        },
+        {
+          "name": "Toggle Service Active",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"is_active\": false\n}" },
+            "url": { "raw": "{{base_url}}/api/products/1", "host": ["{{base_url}}"], "path": ["api", "products", "1"] }
+          }
+        },
+        {
+          "name": "Delete Service",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/products/1", "host": ["{{base_url}}"], "path": ["api", "products", "1"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🏷️ Service Categories",
+      "description": "Dynamic category management — multi-tenant with color/icon support",
+      "item": [
+        {
+          "name": "List All Categories",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/service-categories", "host": ["{{base_url}}"], "path": ["api", "service-categories"] }
+          }
+        },
+        {
+          "name": "List Categories (filtered)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/service-categories?active=true&search=hair",
+              "host": ["{{base_url}}"],
+              "path": ["api", "service-categories"],
+              "query": [
+                { "key": "active", "value": "true" },
+                { "key": "search", "value": "hair" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Category by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/service-categories/1", "host": ["{{base_url}}"], "path": ["api", "service-categories", "1"] }
+          }
+        },
+        {
+          "name": "Create Category",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Body Treatments\",\n  \"name_ar\": \"علاجات الجسم\",\n  \"icon\": \"🧖\",\n  \"color\": \"#4CAF50\",\n  \"sort_order\": 10\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/service-categories", "host": ["{{base_url}}"], "path": ["api", "service-categories"] }
+          }
+        },
+        {
+          "name": "Update Category",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Body & Wellness\",\n  \"color\": \"#009688\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/service-categories/1", "host": ["{{base_url}}"], "path": ["api", "service-categories", "1"] }
+          }
+        },
+        {
+          "name": "Toggle Category Active",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"is_active\": false\n}" },
+            "url": { "raw": "{{base_url}}/api/service-categories/1", "host": ["{{base_url}}"], "path": ["api", "service-categories", "1"] }
+          }
+        },
+        {
+          "name": "Reorder Categories (Bulk)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    { \"id\": 1, \"sort_order\": 1 },\n    { \"id\": 2, \"sort_order\": 2 },\n    { \"id\": 3, \"sort_order\": 3 }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/service-categories/reorder/bulk", "host": ["{{base_url}}"], "path": ["api", "service-categories", "reorder", "bulk"] }
+          }
+        },
+        {
+          "name": "Delete Category",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/service-categories/1", "host": ["{{base_url}}"], "path": ["api", "service-categories", "1"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📅 Appointments",
+      "description": "Appointment booking with conflict detection and staff availability",
+      "item": [
+        {
+          "name": "List Appointments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/appointments?page=1&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["api", "appointments"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "10" },
+                { "key": "status", "value": "", "disabled": true },
+                { "key": "staff_id", "value": "", "disabled": true },
+                { "key": "from_date", "value": "", "disabled": true },
+                { "key": "to_date", "value": "", "disabled": true },
+                { "key": "date", "value": "", "disabled": true },
+                { "key": "all", "value": "true", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Appointment by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/appointments/1", "host": ["{{base_url}}"], "path": ["api", "appointments", "1"] }
+          }
+        },
+        {
+          "name": "Create Appointment",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer_id\": 1,\n  \"service_id\": 1,\n  \"staff_id\": 1,\n  \"start_time\": \"2026-02-20T10:00:00.000Z\",\n  \"end_time\": \"2026-02-20T11:00:00.000Z\",\n  \"notes\": \"First time client, prefers gentle products\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/appointments", "host": ["{{base_url}}"], "path": ["api", "appointments"] }
+          }
+        },
+        {
+          "name": "Update Appointment",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"confirmed\",\n  \"notes\": \"Client confirmed via phone\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/appointments/1", "host": ["{{base_url}}"], "path": ["api", "appointments", "1"] }
+          }
+        },
+        {
+          "name": "Cancel Appointment",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"cancelled\"\n}" },
+            "url": { "raw": "{{base_url}}/api/appointments/1", "host": ["{{base_url}}"], "path": ["api", "appointments", "1"] }
+          }
+        },
+        {
+          "name": "Delete Appointment",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/appointments/1", "host": ["{{base_url}}"], "path": ["api", "appointments", "1"] }
+          }
+        },
+        {
+          "name": "Staff Availability",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/appointments/staff/1/availability?date=2026-02-20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "appointments", "staff", "1", "availability"],
+              "query": [{ "key": "date", "value": "2026-02-20" }]
+            }
+          }
+        },
+        {
+          "name": "Dashboard Today",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/appointments/dashboard/today", "host": ["{{base_url}}"], "path": ["api", "appointments", "dashboard", "today"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "👥 Staff",
+      "description": "Staff management with roles: admin, manager, receptionist, employee, staff, customer",
+      "item": [
+        {
+          "name": "List Staff",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff", "host": ["{{base_url}}"], "path": ["api", "staff"] }
+          }
+        },
+        {
+          "name": "Create Staff Member",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"sarah_stylist\",\n  \"email\": \"sarah@beauty.com\",\n  \"password\": \"StaffPass123\",\n  \"full_name\": \"Sarah Johnson\",\n  \"role\": \"employee\",\n  \"phone\": \"+971501234567\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/staff", "host": ["{{base_url}}"], "path": ["api", "staff"] }
+          }
+        },
+        {
+          "name": "Update Staff Member",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Sarah J. Johnson\",\n  \"role\": \"manager\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/staff/1", "host": ["{{base_url}}"], "path": ["api", "staff", "1"] }
+          }
+        },
+        {
+          "name": "Delete Staff Member",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff/1", "host": ["{{base_url}}"], "path": ["api", "staff", "1"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📆 Staff Schedule",
+      "description": "Staff schedules, days off, and specializations",
+      "item": [
+        {
+          "name": "Get Schedules",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff-schedule/schedules", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "schedules"] }
+          }
+        },
+        {
+          "name": "Create Schedule",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"staff_id\": 1,\n  \"day_of_week\": 1,\n  \"start_time\": \"09:00\",\n  \"end_time\": \"18:00\",\n  \"is_available\": true\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/staff-schedule/schedules", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "schedules"] }
+          }
+        },
+        {
+          "name": "Update Schedule",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"start_time\": \"10:00\",\n  \"end_time\": \"19:00\"\n}" },
+            "url": { "raw": "{{base_url}}/api/staff-schedule/schedules/1", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "schedules", "1"] }
+          }
+        },
+        {
+          "name": "Delete Schedule",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff-schedule/schedules/1", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "schedules", "1"] }
+          }
+        },
+        {
+          "name": "Get Days Off",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff-schedule/days-off", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "days-off"] }
+          }
+        },
+        {
+          "name": "Create Day Off",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"staff_id\": 1,\n  \"date\": \"2026-03-01\",\n  \"reason\": \"Personal day\"\n}" },
+            "url": { "raw": "{{base_url}}/api/staff-schedule/days-off", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "days-off"] }
+          }
+        },
+        {
+          "name": "Delete Day Off",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff-schedule/days-off/1", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "days-off", "1"] }
+          }
+        },
+        {
+          "name": "Get Specializations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff-schedule/specializations", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "specializations"] }
+          }
+        },
+        {
+          "name": "Create Specialization",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"staff_id\": 1,\n  \"service_id\": 1,\n  \"skill_level\": \"expert\"\n}" },
+            "url": { "raw": "{{base_url}}/api/staff-schedule/specializations", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "specializations"] }
+          }
+        },
+        {
+          "name": "Schedule Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/staff-schedule/stats", "host": ["{{base_url}}"], "path": ["api", "staff-schedule", "stats"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🎯 Loyalty Program",
+      "description": "Customer loyalty points and tier management",
+      "item": [
+        {
+          "name": "List Loyalty Members",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/loyalty", "host": ["{{base_url}}"], "path": ["api", "loyalty"] }
+          }
+        },
+        {
+          "name": "Enroll Customer",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"customer_id\": 1,\n  \"tier\": \"bronze\"\n}" },
+            "url": { "raw": "{{base_url}}/api/loyalty", "host": ["{{base_url}}"], "path": ["api", "loyalty"] }
+          }
+        },
+        {
+          "name": "Update Member Tier",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"tier\": \"gold\"\n}" },
+            "url": { "raw": "{{base_url}}/api/loyalty/1", "host": ["{{base_url}}"], "path": ["api", "loyalty", "1"] }
+          }
+        },
+        {
+          "name": "Get Member Transactions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/loyalty/1/transactions", "host": ["{{base_url}}"], "path": ["api", "loyalty", "1", "transactions"] }
+          }
+        },
+        {
+          "name": "Add Transaction (Points)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"type\": \"earn\",\n  \"points\": 50,\n  \"description\": \"Points for haircut purchase\",\n  \"reference_type\": \"appointment\",\n  \"reference_id\": 1\n}" },
+            "url": { "raw": "{{base_url}}/api/loyalty/1/transaction", "host": ["{{base_url}}"], "path": ["api", "loyalty", "1", "transaction"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "👤 Contacts",
+      "description": "Customer/contact management",
+      "item": [
+        {
+          "name": "List Contacts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/contacts?page=1&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "contacts"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "search", "value": "", "disabled": true },
+                { "key": "status", "value": "", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Contact by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/contacts/1", "host": ["{{base_url}}"], "path": ["api", "contacts", "1"] }
+          }
+        },
+        {
+          "name": "Create Contact",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Fatima\",\n  \"last_name\": \"Al-Rashid\",\n  \"email\": \"fatima@example.com\",\n  \"phone\": \"+971501234567\",\n  \"status\": \"active\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/contacts", "host": ["{{base_url}}"], "path": ["api", "contacts"] }
+          }
+        },
+        {
+          "name": "Update Contact",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"+971509999999\",\n  \"status\": \"vip\"\n}" },
+            "url": { "raw": "{{base_url}}/api/contacts/1", "host": ["{{base_url}}"], "path": ["api", "contacts", "1"] }
+          }
+        },
+        {
+          "name": "Delete Contact",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/contacts/1", "host": ["{{base_url}}"], "path": ["api", "contacts", "1"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🏢 Accounts",
+      "description": "Business accounts / organizations",
+      "item": [
+        {
+          "name": "List Accounts",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/accounts", "host": ["{{base_url}}"], "path": ["api", "accounts"] } }
+        },
+        {
+          "name": "Get Account by ID",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/accounts/1", "host": ["{{base_url}}"], "path": ["api", "accounts", "1"] } }
+        },
+        {
+          "name": "Create Account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"VIP Beauty Corp\",\n  \"industry\": \"Beauty\",\n  \"website\": \"https://vipbeauty.com\",\n  \"phone\": \"+971501234567\"\n}" },
+            "url": { "raw": "{{base_url}}/api/accounts", "host": ["{{base_url}}"], "path": ["api", "accounts"] }
+          }
+        },
+        {
+          "name": "Update Account",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"VIP Beauty Corp Updated\"\n}" },
+            "url": { "raw": "{{base_url}}/api/accounts/1", "host": ["{{base_url}}"], "path": ["api", "accounts", "1"] }
+          }
+        },
+        {
+          "name": "Delete Account",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/accounts/1", "host": ["{{base_url}}"], "path": ["api", "accounts", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📊 Leads",
+      "description": "Lead management and conversion pipeline",
+      "item": [
+        {
+          "name": "List Leads",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/leads?page=1&limit=20", "host": ["{{base_url}}"], "path": ["api", "leads"], "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }] } }
+        },
+        {
+          "name": "Get Lead by ID",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/leads/1", "host": ["{{base_url}}"], "path": ["api", "leads", "1"] } }
+        },
+        {
+          "name": "Create Lead",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"first_name\": \"New\",\n  \"last_name\": \"Lead\",\n  \"email\": \"newlead@example.com\",\n  \"phone\": \"+971501111111\",\n  \"source\": \"instagram\",\n  \"status\": \"new\"\n}" },
+            "url": { "raw": "{{base_url}}/api/leads", "host": ["{{base_url}}"], "path": ["api", "leads"] }
+          }
+        },
+        {
+          "name": "Update Lead",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"qualified\",\n  \"score\": 85\n}" },
+            "url": { "raw": "{{base_url}}/api/leads/1", "host": ["{{base_url}}"], "path": ["api", "leads", "1"] }
+          }
+        },
+        {
+          "name": "Convert Lead to Contact",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{base_url}}/api/leads/1/convert", "host": ["{{base_url}}"], "path": ["api", "leads", "1", "convert"] }
+          }
+        },
+        {
+          "name": "Delete Lead",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/leads/1", "host": ["{{base_url}}"], "path": ["api", "leads", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "💰 Deals",
+      "description": "Deal/opportunity management",
+      "item": [
+        {
+          "name": "List Deals",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/deals", "host": ["{{base_url}}"], "path": ["api", "deals"] } }
+        },
+        {
+          "name": "Create Deal",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Wedding Package\",\n  \"amount\": 5000,\n  \"currency\": \"AED\",\n  \"probability\": 60,\n  \"contact_id\": 1,\n  \"description\": \"Full wedding beauty package\"\n}" },
+            "url": { "raw": "{{base_url}}/api/deals", "host": ["{{base_url}}"], "path": ["api", "deals"] }
+          }
+        },
+        {
+          "name": "Update Deal",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"won\",\n  \"amount\": 5500\n}" },
+            "url": { "raw": "{{base_url}}/api/deals/1", "host": ["{{base_url}}"], "path": ["api", "deals", "1"] }
+          }
+        },
+        {
+          "name": "Delete Deal",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/deals/1", "host": ["{{base_url}}"], "path": ["api", "deals", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "🔄 Pipelines",
+      "description": "Sales pipeline and stage management",
+      "item": [
+        {
+          "name": "List Pipelines",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/pipelines", "host": ["{{base_url}}"], "path": ["api", "pipelines"] } }
+        },
+        {
+          "name": "Create Pipeline",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Wedding Pipeline\",\n  \"stages\": [\n    { \"name\": \"Inquiry\", \"position\": 1 },\n    { \"name\": \"Consultation\", \"position\": 2 },\n    { \"name\": \"Proposal\", \"position\": 3 },\n    { \"name\": \"Booked\", \"position\": 4 }\n  ]\n}" },
+            "url": { "raw": "{{base_url}}/api/pipelines", "host": ["{{base_url}}"], "path": ["api", "pipelines"] }
+          }
+        },
+        {
+          "name": "Update Pipeline",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Updated Pipeline\"\n}" },
+            "url": { "raw": "{{base_url}}/api/pipelines/1", "host": ["{{base_url}}"], "path": ["api", "pipelines", "1"] }
+          }
+        },
+        {
+          "name": "Delete Pipeline",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/pipelines/1", "host": ["{{base_url}}"], "path": ["api", "pipelines", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📝 Activities",
+      "description": "Activity logging (calls, emails, meetings, tasks)",
+      "item": [
+        {
+          "name": "List Activities",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/activities", "host": ["{{base_url}}"], "path": ["api", "activities"] } }
+        },
+        {
+          "name": "Create Activity",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"type\": \"call\",\n  \"subject\": \"Follow-up call\",\n  \"description\": \"Called to confirm appointment\",\n  \"related_type\": \"contact\",\n  \"related_id\": 1,\n  \"due_date\": \"2026-02-20\",\n  \"due_time\": \"10:00\",\n  \"priority\": \"medium\"\n}" },
+            "url": { "raw": "{{base_url}}/api/activities", "host": ["{{base_url}}"], "path": ["api", "activities"] }
+          }
+        },
+        {
+          "name": "Update Activity",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"completed\"\n}" },
+            "url": { "raw": "{{base_url}}/api/activities/1", "host": ["{{base_url}}"], "path": ["api", "activities", "1"] }
+          }
+        },
+        {
+          "name": "Delete Activity",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/activities/1", "host": ["{{base_url}}"], "path": ["api", "activities", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📎 Notes",
+      "item": [
+        {
+          "name": "List Notes",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/notes", "host": ["{{base_url}}"], "path": ["api", "notes"] } }
+        },
+        {
+          "name": "Create Note",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"content\": \"Client prefers organic products\",\n  \"entity_type\": \"contact\",\n  \"entity_id\": 1\n}" },
+            "url": { "raw": "{{base_url}}/api/notes", "host": ["{{base_url}}"], "path": ["api", "notes"] }
+          }
+        },
+        {
+          "name": "Update Note",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"content\": \"Updated note content\"\n}" },
+            "url": { "raw": "{{base_url}}/api/notes/1", "host": ["{{base_url}}"], "path": ["api", "notes", "1"] }
+          }
+        },
+        {
+          "name": "Delete Note",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/notes/1", "host": ["{{base_url}}"], "path": ["api", "notes", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "🏷️ Tags",
+      "item": [
+        {
+          "name": "List Tags",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/tags", "host": ["{{base_url}}"], "path": ["api", "tags"] } }
+        },
+        {
+          "name": "Create Tag",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"VIP Client\",\n  \"color\": \"#E91E63\"\n}" },
+            "url": { "raw": "{{base_url}}/api/tags", "host": ["{{base_url}}"], "path": ["api", "tags"] }
+          }
+        },
+        {
+          "name": "Update Tag",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Premium VIP\"\n}" },
+            "url": { "raw": "{{base_url}}/api/tags/1", "host": ["{{base_url}}"], "path": ["api", "tags", "1"] }
+          }
+        },
+        {
+          "name": "Delete Tag",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/tags/1", "host": ["{{base_url}}"], "path": ["api", "tags", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📄 Quotes",
+      "item": [
+        {
+          "name": "List Quotes",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/quotes", "host": ["{{base_url}}"], "path": ["api", "quotes"] } }
+        },
+        {
+          "name": "Get Quote by ID",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/quotes/1", "host": ["{{base_url}}"], "path": ["api", "quotes", "1"] } }
+        },
+        {
+          "name": "Create Quote",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"contact_id\": 1,\n  \"title\": \"Wedding Package Quote\",\n  \"valid_until\": \"2026-03-15\",\n  \"items\": [\n    { \"product_id\": 1, \"quantity\": 1, \"unit_price\": 500 },\n    { \"product_id\": 2, \"quantity\": 2, \"unit_price\": 150 }\n  ]\n}" },
+            "url": { "raw": "{{base_url}}/api/quotes", "host": ["{{base_url}}"], "path": ["api", "quotes"] }
+          }
+        },
+        {
+          "name": "Update Quote",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"accepted\"\n}" },
+            "url": { "raw": "{{base_url}}/api/quotes/1", "host": ["{{base_url}}"], "path": ["api", "quotes", "1"] }
+          }
+        },
+        {
+          "name": "Delete Quote",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/quotes/1", "host": ["{{base_url}}"], "path": ["api", "quotes", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "🏬 Branches",
+      "item": [
+        {
+          "name": "List Branches",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/branches", "host": ["{{base_url}}"], "path": ["api", "branches"] } }
+        },
+        {
+          "name": "Create Branch",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Downtown Branch\",\n  \"address\": \"King Fahd Road, Riyadh\",\n  \"phone\": \"+966501234567\"\n}" },
+            "url": { "raw": "{{base_url}}/api/branches", "host": ["{{base_url}}"], "path": ["api", "branches"] }
+          }
+        },
+        {
+          "name": "Update Branch",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Downtown Main Branch\"\n}" },
+            "url": { "raw": "{{base_url}}/api/branches/1", "host": ["{{base_url}}"], "path": ["api", "branches", "1"] }
+          }
+        },
+        {
+          "name": "Delete Branch",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/branches/1", "host": ["{{base_url}}"], "path": ["api", "branches", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📢 Campaigns",
+      "item": [
+        {
+          "name": "List Campaigns",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/campaigns", "host": ["{{base_url}}"], "path": ["api", "campaigns"] } }
+        },
+        {
+          "name": "Create Campaign",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Summer Promo\",\n  \"type\": \"email\",\n  \"status\": \"draft\",\n  \"subject\": \"50% Off Summer Services!\",\n  \"content\": \"Enjoy our summer beauty specials...\"\n}" },
+            "url": { "raw": "{{base_url}}/api/campaigns", "host": ["{{base_url}}"], "path": ["api", "campaigns"] }
+          }
+        },
+        {
+          "name": "Update Campaign",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"active\"\n}" },
+            "url": { "raw": "{{base_url}}/api/campaigns/1", "host": ["{{base_url}}"], "path": ["api", "campaigns", "1"] }
+          }
+        },
+        {
+          "name": "Delete Campaign",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/campaigns/1", "host": ["{{base_url}}"], "path": ["api", "campaigns", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📁 Documents",
+      "item": [
+        {
+          "name": "List Documents",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/documents", "host": ["{{base_url}}"], "path": ["api", "documents"] } }
+        },
+        {
+          "name": "Create Document",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Service Agreement\",\n  \"type\": \"contract\",\n  \"url\": \"https://storage.example.com/agreements/001.pdf\",\n  \"entity_type\": \"contact\",\n  \"entity_id\": 1\n}" },
+            "url": { "raw": "{{base_url}}/api/documents", "host": ["{{base_url}}"], "path": ["api", "documents"] }
+          }
+        },
+        {
+          "name": "Update Document",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Updated Service Agreement\"\n}" },
+            "url": { "raw": "{{base_url}}/api/documents/1", "host": ["{{base_url}}"], "path": ["api", "documents", "1"] }
+          }
+        },
+        {
+          "name": "Delete Document",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/documents/1", "host": ["{{base_url}}"], "path": ["api", "documents", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "📧 Email Templates",
+      "item": [
+        {
+          "name": "List Templates",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/email-templates", "host": ["{{base_url}}"], "path": ["api", "email-templates"] } }
+        },
+        {
+          "name": "Create Template",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Appointment Reminder\",\n  \"subject\": \"Your appointment is tomorrow!\",\n  \"body\": \"<h1>Hi {{name}}</h1><p>Your appointment is scheduled for {{date}}.</p>\",\n  \"category\": \"reminder\"\n}" },
+            "url": { "raw": "{{base_url}}/api/email-templates", "host": ["{{base_url}}"], "path": ["api", "email-templates"] }
+          }
+        },
+        {
+          "name": "Update Template",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"subject\": \"Reminder: Your appointment is coming up!\"\n}" },
+            "url": { "raw": "{{base_url}}/api/email-templates/1", "host": ["{{base_url}}"], "path": ["api", "email-templates", "1"] }
+          }
+        },
+        {
+          "name": "Delete Template",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/email-templates/1", "host": ["{{base_url}}"], "path": ["api", "email-templates", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "💬 Inbox",
+      "item": [
+        {
+          "name": "List Conversations",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/inbox/conversations", "host": ["{{base_url}}"], "path": ["api", "inbox", "conversations"] } }
+        },
+        {
+          "name": "Get Conversation",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/inbox/conversations/1", "host": ["{{base_url}}"], "path": ["api", "inbox", "conversations", "1"] } }
+        },
+        {
+          "name": "Update Conversation",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"resolved\"\n}" },
+            "url": { "raw": "{{base_url}}/api/inbox/conversations/1", "host": ["{{base_url}}"], "path": ["api", "inbox", "conversations", "1"] }
+          }
+        },
+        {
+          "name": "Send Message",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"conversation_id\": 1,\n  \"content\": \"Thank you for contacting us! We will get back to you shortly.\",\n  \"message_type\": \"reply\"\n}" },
+            "url": { "raw": "{{base_url}}/api/inbox/messages", "host": ["{{base_url}}"], "path": ["api", "inbox", "messages"] }
+          }
+        },
+        {
+          "name": "Get Channels",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/inbox/channels", "host": ["{{base_url}}"], "path": ["api", "inbox", "channels"] } }
+        },
+        {
+          "name": "Get Templates",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/inbox/templates", "host": ["{{base_url}}"], "path": ["api", "inbox", "templates"] } }
+        }
+      ]
+    },
+    {
+      "name": "👥 Audiences",
+      "item": [
+        {
+          "name": "List Audiences",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/audiences", "host": ["{{base_url}}"], "path": ["api", "audiences"] } }
+        },
+        {
+          "name": "Get Audience by ID",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/audiences/1", "host": ["{{base_url}}"], "path": ["api", "audiences", "1"] } }
+        },
+        {
+          "name": "Create Audience",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"VIP Clients\",\n  \"type\": \"dynamic\",\n  \"filters\": { \"status\": \"vip\" }\n}" },
+            "url": { "raw": "{{base_url}}/api/audiences", "host": ["{{base_url}}"], "path": ["api", "audiences"] }
+          }
+        },
+        {
+          "name": "Add Members",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"contact_ids\": [1, 2, 3]\n}" },
+            "url": { "raw": "{{base_url}}/api/audiences/1/members", "host": ["{{base_url}}"], "path": ["api", "audiences", "1", "members"] }
+          }
+        },
+        {
+          "name": "Sync Audience",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/audiences/1/sync", "host": ["{{base_url}}"], "path": ["api", "audiences", "1", "sync"] }
+          }
+        },
+        {
+          "name": "Delete Audience",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/audiences/1", "host": ["{{base_url}}"], "path": ["api", "audiences", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "🔗 Integrations",
+      "item": [
+        {
+          "name": "Get Providers",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/integrations/providers", "host": ["{{base_url}}"], "path": ["api", "integrations", "providers"] } }
+        },
+        {
+          "name": "List Integrations",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/integrations", "host": ["{{base_url}}"], "path": ["api", "integrations"] } }
+        },
+        {
+          "name": "Get Integration by ID",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/integrations/1", "host": ["{{base_url}}"], "path": ["api", "integrations", "1"] } }
+        },
+        {
+          "name": "Create Integration",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"provider\": \"whatsapp\",\n  \"config\": { \"api_key\": \"your-key\" },\n  \"is_active\": true\n}" },
+            "url": { "raw": "{{base_url}}/api/integrations", "host": ["{{base_url}}"], "path": ["api", "integrations"] }
+          }
+        },
+        {
+          "name": "Test Integration",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/integrations/1/test", "host": ["{{base_url}}"], "path": ["api", "integrations", "1", "test"] }
+          }
+        },
+        {
+          "name": "Get Integration Logs",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/integrations/1/logs", "host": ["{{base_url}}"], "path": ["api", "integrations", "1", "logs"] } }
+        },
+        {
+          "name": "Delete Integration",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/integrations/1", "host": ["{{base_url}}"], "path": ["api", "integrations", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "⚙️ Custom Fields",
+      "item": [
+        {
+          "name": "List Custom Fields",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/custom-fields", "host": ["{{base_url}}"], "path": ["api", "custom-fields"] } }
+        },
+        {
+          "name": "Create Custom Field",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Preferred Stylist\",\n  \"field_type\": \"text\",\n  \"entity_type\": \"contact\",\n  \"is_required\": false\n}" },
+            "url": { "raw": "{{base_url}}/api/custom-fields", "host": ["{{base_url}}"], "path": ["api", "custom-fields"] }
+          }
+        },
+        {
+          "name": "Update Custom Field",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Preferred Stylist Name\"\n}" },
+            "url": { "raw": "{{base_url}}/api/custom-fields/1", "host": ["{{base_url}}"], "path": ["api", "custom-fields", "1"] }
+          }
+        },
+        {
+          "name": "Delete Custom Field",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/custom-fields/1", "host": ["{{base_url}}"], "path": ["api", "custom-fields", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "🔄 Workflows",
+      "item": [
+        {
+          "name": "List Workflows",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/workflows", "host": ["{{base_url}}"], "path": ["api", "workflows"] } }
+        },
+        {
+          "name": "Get Workflow Logs",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/workflows/logs", "host": ["{{base_url}}"], "path": ["api", "workflows", "logs"] } }
+        },
+        {
+          "name": "Create Workflow",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"New Client Welcome\",\n  \"trigger\": \"contact_created\",\n  \"actions\": [\n    { \"type\": \"send_email\", \"template_id\": 1 }\n  ]\n}" },
+            "url": { "raw": "{{base_url}}/api/workflows", "host": ["{{base_url}}"], "path": ["api", "workflows"] }
+          }
+        },
+        {
+          "name": "Update Workflow",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"is_active\": true\n}" },
+            "url": { "raw": "{{base_url}}/api/workflows/1", "host": ["{{base_url}}"], "path": ["api", "workflows", "1"] }
+          }
+        },
+        {
+          "name": "Delete Workflow",
+          "request": { "method": "DELETE", "header": [], "url": { "raw": "{{base_url}}/api/workflows/1", "host": ["{{base_url}}"], "path": ["api", "workflows", "1"] } }
+        }
+      ]
+    },
+    {
+      "name": "🤖 AI Chat",
+      "item": [
+        {
+          "name": "Send Chat Message",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"message\": \"How many appointments do I have today?\",\n  \"conversation_history\": []\n}" },
+            "url": { "raw": "{{base_url}}/api/ai/chat", "host": ["{{base_url}}"], "path": ["api", "ai", "chat"] }
+          }
+        },
+        {
+          "name": "Quick Stats",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/ai/quick-stats", "host": ["{{base_url}}"], "path": ["api", "ai", "quick-stats"] } }
+        },
+        {
+          "name": "Debug Info",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/ai/debug", "host": ["{{base_url}}"], "path": ["api", "ai", "debug"] } }
+        }
+      ]
+    },
+    {
+      "name": "📊 Stats & Reports",
+      "item": [
+        {
+          "name": "Dashboard Stats",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/stats", "host": ["{{base_url}}"], "path": ["api", "stats"] } }
+        },
+        {
+          "name": "Reports",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/reports", "host": ["{{base_url}}"], "path": ["api", "reports"] } }
+        },
+        {
+          "name": "Audit Logs",
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base_url}}/api/audit-logs", "host": ["{{base_url}}"], "path": ["api", "audit-logs"] } }
+        }
+      ]
+    }
+  ]
+}

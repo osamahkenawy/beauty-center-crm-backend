@@ -110,12 +110,19 @@ export function platformOwnerOnly(req, res, next) {
 }
 
 /**
- * Tenant owner only middleware
- * Only allows the owner of the current tenant
+ * Tenant owner / admin middleware
+ * Allows tenant owner, admin/manager role, staff with write permission, or platform owner
  */
 export function tenantOwnerOnly(req, res, next) {
-  if (!req.user?.is_owner && !req.user?.permissions?.platform_owner) {
-    return res.status(403).json({ success: false, message: 'Tenant owner access required' });
+  const role = req.user?.role;
+  const isOwner = req.user?.is_owner;
+  const isPlatformOwner = req.user?.permissions?.platform_owner;
+  const isAdminRole = role === 'admin' || role === 'manager';
+  const hasAll = req.user?.permissions?.all;
+  const hasWrite = req.user?.permissions?.write;
+
+  if (!isOwner && !isPlatformOwner && !isAdminRole && !hasAll && !hasWrite) {
+    return res.status(403).json({ success: false, message: 'Write access required' });
   }
   next();
 }

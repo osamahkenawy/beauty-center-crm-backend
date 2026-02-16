@@ -47,6 +47,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const documents = await query(sql, params);
     res.json({ success: true, data: documents });
   } catch (error) {
+    console.error('Get documents error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch documents' });
   }
 });
@@ -68,6 +69,7 @@ router.post('/', authMiddleware, async (req, res) => {
     );
     res.json({ success: true, message: 'Document created', data: { id: result.insertId } });
   } catch (error) {
+    console.error('Create document error:', error);
     res.status(500).json({ success: false, message: 'Failed to create document' });
   }
 });

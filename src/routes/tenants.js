@@ -193,28 +193,42 @@ router.get('/current', authMiddleware, async (req, res) => {
  */
 router.patch('/current', authMiddleware, tenantOwnerOnly, async (req, res) => {
   try {
-    const { 
-      name, email, phone, logo_url, address, city, country, 
-      timezone, currency, language, settings 
-    } = req.body;
-    
-    await execute(
-      `UPDATE tenants SET 
-        name = COALESCE(?, name),
-        email = COALESCE(?, email),
-        phone = COALESCE(?, phone),
-        logo_url = COALESCE(?, logo_url),
-        address = COALESCE(?, address),
-        city = COALESCE(?, city),
-        country = COALESCE(?, country),
-        timezone = COALESCE(?, timezone),
-        currency = COALESCE(?, currency),
-        language = COALESCE(?, language),
-        settings = COALESCE(?, settings)
-       WHERE id = ?`,
-      [name, email, phone, logo_url, address, city, country, timezone, currency, language, 
-       settings ? JSON.stringify(settings) : null, req.tenantId]
-    );
+    const fields = ['name', 'email', 'phone', 'logo_url', 'address', 'city', 'country', 'timezone', 'currency', 'language'];
+    const updates = [];
+    const params = [];
+
+    for (const f of fields) {
+      if (req.body[f] !== undefined) {
+        updates.push(`${f} = ?`);
+        params.push(req.body[f] || null); // empty string → null
+      }
+    }
+
+    // logo_url special case: allow empty string to explicitly clear
+    if (req.body.logo_url === '') {
+      // Already handled above as null, which clears it
+    }
+
+    // Handle settings separately (JSON) — frontend may send as string or object
+    if (req.body.settings !== undefined) {
+      updates.push('settings = ?');
+      const settingsVal = req.body.settings;
+      if (!settingsVal) {
+        params.push(null);
+      } else if (typeof settingsVal === 'string') {
+        // Already a JSON string from frontend — store as-is
+        params.push(settingsVal);
+      } else {
+        params.push(JSON.stringify(settingsVal));
+      }
+    }
+
+    if (updates.length === 0) {
+      return res.json({ success: true, message: 'No changes' });
+    }
+
+    params.push(req.tenantId);
+    await execute(`UPDATE tenants SET ${updates.join(', ')} WHERE id = ?`, params);
     
     res.json({ success: true, message: 'Tenant updated successfully' });
   } catch (error) {
@@ -309,8 +323,7 @@ router.get('/', authMiddleware, platformOwnerOnly, async (req, res) => {
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     
-    sql += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
+    sql += ` ORDER BY t.created_at DESC LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
     
     const tenants = await query(sql, params);
     

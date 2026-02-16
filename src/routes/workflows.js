@@ -53,12 +53,13 @@ router.get('/', authMiddleware, async (req, res) => {
     const workflows = await query(sql, params);
     const parsed = workflows.map(w => ({
       ...w,
-      conditions: w.conditions ? JSON.parse(w.conditions) : [],
-      actions: w.actions ? JSON.parse(w.actions) : []
+      conditions: typeof w.conditions === 'string' ? JSON.parse(w.conditions) : (w.conditions || []),
+      actions: typeof w.actions === 'string' ? JSON.parse(w.actions) : (w.actions || [])
     }));
     
     res.json({ success: true, data: parsed });
   } catch (error) {
+    console.error('Get workflows error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch workflows' });
   }
 });

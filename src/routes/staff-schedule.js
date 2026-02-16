@@ -17,7 +17,7 @@ router.get('/schedules', async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const schedules = await query(
-      `SELECT ss.*, CONCAT(s.first_name, ' ', s.last_name) as staff_name
+      `SELECT ss.*, s.full_name as staff_name
        FROM staff_schedule ss
        LEFT JOIN staff s ON ss.staff_id = s.id
        WHERE ss.tenant_id = ?
@@ -122,7 +122,7 @@ router.get('/days-off', async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const daysOff = await query(
-      `SELECT sdo.*, CONCAT(s.first_name, ' ', s.last_name) as staff_name
+      `SELECT sdo.*, s.full_name as staff_name
        FROM staff_days_off sdo
        LEFT JOIN staff s ON sdo.staff_id = s.id
        WHERE sdo.tenant_id = ?
@@ -186,9 +186,10 @@ router.get('/specializations', async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const specs = await query(
-      `SELECT ssp.*, CONCAT(s.first_name, ' ', s.last_name) as staff_name
+      `SELECT ssp.*, s.full_name as staff_name, p.name as service_name
        FROM staff_specializations ssp
        LEFT JOIN staff s ON ssp.staff_id = s.id
+       LEFT JOIN products p ON ssp.service_id = p.id
        WHERE ssp.tenant_id = ?
        ORDER BY ssp.staff_id`,
       [tenantId]
@@ -205,16 +206,25 @@ router.get('/specializations', async (req, res) => {
  */
 router.post('/specializations', async (req, res) => {
   try {
-    const { staff_id, specialization } = req.body;
+    const { staff_id, service_id, skill_level } = req.body;
     const tenantId = req.tenantId;
 
-    if (!staff_id || !specialization) {
-      return res.status(400).json({ success: false, message: 'Staff and specialization are required' });
+    if (!staff_id || !service_id) {
+      return res.status(400).json({ success: false, message: 'Staff and service are required' });
+    }
+
+    // Check for duplicate
+    const existing = await query(
+      'SELECT id FROM staff_specializations WHERE tenant_id = ? AND staff_id = ? AND service_id = ?',
+      [tenantId, staff_id, service_id]
+    );
+    if (existing.length > 0) {
+      return res.status(400).json({ success: false, message: 'Staff member already has this specialization' });
     }
 
     const result = await execute(
-      'INSERT INTO staff_specializations (tenant_id, staff_id, specialization) VALUES (?, ?, ?)',
-      [tenantId, staff_id, specialization]
+      'INSERT INTO staff_specializations (tenant_id, staff_id, service_id, skill_level) VALUES (?, ?, ?, ?)',
+      [tenantId, staff_id, service_id, skill_level || 'intermediate']
     );
 
     res.json({ success: true, data: { id: result.insertId }, message: 'Specialization added' });
@@ -249,7 +259,7 @@ router.get('/stats', async (req, res) => {
     const [staffCount] = await query('SELECT COUNT(*) as count FROM staff WHERE tenant_id = ?', [tenantId]);
     const [scheduleCount] = await query('SELECT COUNT(*) as count FROM staff_schedule WHERE tenant_id = ?', [tenantId]);
     const [daysOffCount] = await query('SELECT COUNT(*) as count FROM staff_days_off WHERE tenant_id = ? AND date >= CURDATE()', [tenantId]);
-    const [specCount] = await query('SELECT COUNT(DISTINCT specialization) as count FROM staff_specializations WHERE tenant_id = ?', [tenantId]);
+    const [specCount] = await query('SELECT COUNT(DISTINCT service_id) as count FROM staff_specializations WHERE tenant_id = ?', [tenantId]);
 
     res.json({
       success: true,

@@ -39,6 +39,16 @@ import superAdminRoutes from './routes/super-admin.js';
 import appointmentsRoutes from './routes/appointments.js';
 import loyaltyRoutes from './routes/loyalty.js';
 import staffScheduleRoutes from './routes/staff-schedule.js';
+import serviceCategoriesRoutes from './routes/service-categories.js';
+import resourcesRoutes from './routes/resources.js';
+import uploadsRoutes from './routes/uploads.js';
+import invoicesRoutes from './routes/invoices.js';
+import giftCardsRoutes from './routes/gift-cards.js';
+import waitlistsRoutes from './routes/waitlists.js';
+import packagesRoutes from './routes/packages.js';
+import membershipsRoutes from './routes/memberships.js';
+import promotionsRoutes from './routes/promotions.js';
+import reviewsRoutes from './routes/reviews.js';
 
 const app = express();
 
@@ -113,6 +123,16 @@ app.use('/api/ai', aiChatRoutes);
 app.use('/api/appointments', appointmentsRoutes);
 app.use('/api/loyalty', loyaltyRoutes);
 app.use('/api/staff-schedule', staffScheduleRoutes);
+app.use('/api/service-categories', serviceCategoriesRoutes);
+app.use('/api/resources', resourcesRoutes);
+app.use('/api/uploads', uploadsRoutes);
+app.use('/api/invoices', invoicesRoutes);
+app.use('/api/gift-cards', giftCardsRoutes);
+app.use('/api/waitlists', waitlistsRoutes);
+app.use('/api/packages', packagesRoutes);
+app.use('/api/memberships', membershipsRoutes);
+app.use('/api/promotions', promotionsRoutes);
+app.use('/api/reviews', reviewsRoutes);
 
 // 404 handler
 app.use((req, res) => {

@@ -148,8 +148,7 @@ router.get('/tenants', verifySuperAdmin, async (req, res) => {
       params.push(`%${search}%`, `%${search}%`);
     }
 
-    sql += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
+    sql += ` ORDER BY t.created_at DESC LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)}`;
 
     const tenants = await query(sql, params);
     const countResult = await query('SELECT COUNT(*) as total FROM tenants');

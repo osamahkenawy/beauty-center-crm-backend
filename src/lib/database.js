@@ -2,7 +2,9 @@ import mysql from 'mysql2/promise';
 import { config } from '../config.js';
 
 // Custom date type casting to avoid timezone issues
-// This ensures DATE fields are returned as 'YYYY-MM-DD' strings
+// DATE → plain string 'YYYY-MM-DD'
+// DATETIME/TIMESTAMP → proper ISO-8601 UTC string 'YYYY-MM-DDTHH:mm:ssZ'
+//   so the frontend's `new Date(val)` always interprets as UTC
 const typeCast = function(field, next) {
   if (field.type === 'DATE') {
     const value = field.string();
@@ -10,7 +12,9 @@ const typeCast = function(field, next) {
   }
   if (field.type === 'DATETIME' || field.type === 'TIMESTAMP') {
     const value = field.string();
-    return value; // Return as string
+    if (!value) return value;
+    // MySQL stores as 'YYYY-MM-DD HH:mm:ss' — convert to ISO UTC
+    return value.replace(' ', 'T') + 'Z';
   }
   return next();
 };
@@ -170,7 +174,7 @@ async function createTables() {
       full_name VARCHAR(100),
       phone VARCHAR(20),
       avatar_url VARCHAR(500),
-      role ENUM('super_admin', 'admin', 'manager', 'staff') DEFAULT 'staff',
+      role ENUM('super_admin', 'admin', 'manager', 'receptionist', 'employee', 'staff', 'customer') DEFAULT 'staff',
       permissions JSON,
       is_active TINYINT(1) DEFAULT 1,
       is_owner TINYINT(1) DEFAULT 0,
@@ -714,6 +718,155 @@ async function createTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // ===========================================
+  // BEAUTY CENTER SPECIFIC TABLES
+  // ===========================================
+  
+  // Appointments table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS appointments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT NOT NULL,
+      customer_id INT,
+      service_id INT,
+      staff_id INT,
+      start_time DATETIME NOT NULL,
+      end_time DATETIME NOT NULL,
+      status ENUM('scheduled', 'confirmed', 'in_progress', 'completed', 'cancelled', 'no_show') DEFAULT 'scheduled',
+      notes TEXT,
+      reminder_sent BOOLEAN DEFAULT FALSE,
+      customer_showed BOOLEAN DEFAULT FALSE,
+      payment_status ENUM('pending', 'paid', 'refunded') DEFAULT 'pending',
+      created_by INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_tenant (tenant_id),
+      INDEX idx_customer (customer_id),
+      INDEX idx_staff (staff_id),
+      INDEX idx_start_time (start_time),
+      INDEX idx_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Appointment reminders table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS appointment_reminders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      appointment_id INT NOT NULL,
+      send_at DATETIME,
+      method ENUM('email', 'sms', 'whatsapp') DEFAULT 'email',
+      sent_at DATETIME,
+      status ENUM('pending', 'sent', 'failed') DEFAULT 'pending',
+      INDEX idx_appointment (appointment_id),
+      INDEX idx_send_at (send_at),
+      INDEX idx_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Staff schedule table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS staff_schedule (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT NOT NULL,
+      staff_id INT NOT NULL,
+      day_of_week INT NOT NULL COMMENT '0=Sunday, 6=Saturday',
+      start_time TIME NOT NULL,
+      end_time TIME NOT NULL,
+      break_start TIME,
+      break_end TIME,
+      is_working TINYINT(1) DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_tenant (tenant_id),
+      INDEX idx_staff (staff_id),
+      INDEX idx_day (day_of_week)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Staff days off table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS staff_days_off (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT NOT NULL,
+      staff_id INT NOT NULL,
+      date DATE NOT NULL,
+      reason VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_tenant (tenant_id),
+      INDEX idx_staff (staff_id),
+      INDEX idx_date (date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Staff specializations table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS staff_specializations (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT NOT NULL,
+      staff_id INT NOT NULL,
+      service_id INT NOT NULL,
+      skill_level ENUM('beginner', 'intermediate', 'expert', 'master') DEFAULT 'intermediate',
+      certified BOOLEAN DEFAULT FALSE,
+      certification_date DATE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_tenant (tenant_id),
+      INDEX idx_staff (staff_id),
+      INDEX idx_service (service_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Loyalty points table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS loyalty_points (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT NOT NULL,
+      customer_id INT NOT NULL,
+      points INT DEFAULT 0,
+      total_earned INT DEFAULT 0,
+      total_redeemed INT DEFAULT 0,
+      tier VARCHAR(50) DEFAULT 'bronze' COMMENT 'bronze, silver, gold, platinum',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_tenant (tenant_id),
+      INDEX idx_customer (customer_id),
+      UNIQUE KEY unique_tenant_customer (tenant_id, customer_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Loyalty transactions table
+  await execute(`
+    CREATE TABLE IF NOT EXISTS loyalty_transactions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT NOT NULL,
+      customer_id INT NOT NULL,
+      points INT NOT NULL,
+      transaction_type ENUM('earn', 'redeem', 'expire', 'adjust') NOT NULL,
+      reference_type VARCHAR(50),
+      reference_id INT,
+      description TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_tenant (tenant_id),
+      INDEX idx_customer (customer_id),
+      INDEX idx_type (transaction_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Super Admins table (platform-level admins)
+  await execute(`
+    CREATE TABLE IF NOT EXISTS super_admins (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(50) NOT NULL UNIQUE,
+      email VARCHAR(100) UNIQUE,
+      password VARCHAR(255) NOT NULL,
+      full_name VARCHAR(100),
+      role VARCHAR(50) DEFAULT 'super_admin',
+      permissions JSON,
+      is_active TINYINT(1) DEFAULT 1,
+      last_login DATETIME,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   console.log('Tables created/verified successfully');
 }
 
@@ -773,7 +926,114 @@ async function runMultiTenantMigrations() {
     await execute(`ALTER TABLE staff ADD UNIQUE KEY unique_tenant_email (tenant_id, email)`);
     console.log('Added composite unique key for tenant_id + email');
   } catch (e) { /* Key may already exist */ }
-  
+
+  // ============================================================
+  // Schema alignment migrations - add missing columns to tables
+  // that were created by createTables() with minimal schemas
+  // but routes expect additional columns from ensureTable()
+  // ============================================================
+
+  const columnMigrations = [
+    // --- quotes ---
+    { table: 'quotes', column: 'owner_id', definition: 'INT' },
+    { table: 'quotes', column: 'subject', definition: 'VARCHAR(255)' },
+
+    // --- branches ---
+    { table: 'branches', column: 'name_ar', definition: 'VARCHAR(255)' },
+    { table: 'branches', column: 'currency', definition: "VARCHAR(10) DEFAULT 'AED'" },
+
+    // --- campaigns ---
+    { table: 'campaigns', column: 'owner_id', definition: 'INT' },
+    { table: 'campaigns', column: 'actual_cost', definition: 'DECIMAL(15,2) DEFAULT 0' },
+    { table: 'campaigns', column: 'total_sent', definition: 'INT DEFAULT 0' },
+    { table: 'campaigns', column: 'total_opened', definition: 'INT DEFAULT 0' },
+    { table: 'campaigns', column: 'total_clicked', definition: 'INT DEFAULT 0' },
+    { table: 'campaigns', column: 'total_converted', definition: 'INT DEFAULT 0' },
+
+    // --- documents ---
+    { table: 'documents', column: 'title', definition: 'VARCHAR(255)' },
+    { table: 'documents', column: 'file_name', definition: 'VARCHAR(255)' },
+    { table: 'documents', column: 'version', definition: "VARCHAR(20) DEFAULT '1.0'" },
+    { table: 'documents', column: 'is_private', definition: 'TINYINT(1) DEFAULT 0' },
+    { table: 'documents', column: 'owner_id', definition: 'INT' },
+    { table: 'documents', column: 'created_by', definition: 'INT' },
+    { table: 'documents', column: 'updated_at', definition: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' },
+
+    // --- inbox_messages ---
+    { table: 'inbox_messages', column: 'sender_type', definition: "ENUM('customer','agent','system')" },
+    { table: 'inbox_messages', column: 'sender_id', definition: 'INT' },
+    { table: 'inbox_messages', column: 'content_type', definition: "ENUM('text','html','image','file','audio','video') DEFAULT 'text'" },
+    { table: 'inbox_messages', column: 'read_at', definition: 'TIMESTAMP NULL' },
+
+    // --- inbox_channels ---
+    { table: 'inbox_channels', column: 'name', definition: 'VARCHAR(255)' },
+    { table: 'inbox_channels', column: 'is_enabled', definition: 'TINYINT(1) DEFAULT 1' },
+
+    // --- integrations ---
+    { table: 'integrations', column: 'provider', definition: 'VARCHAR(100)' },
+    { table: 'integrations', column: 'credentials', definition: 'JSON' },
+    { table: 'integrations', column: 'is_connected', definition: 'TINYINT(1) DEFAULT 0' },
+    { table: 'integrations', column: 'last_error', definition: 'TEXT' },
+    { table: 'integrations', column: 'webhook_url', definition: 'VARCHAR(500)' },
+    { table: 'integrations', column: 'webhook_secret', definition: 'VARCHAR(255)' },
+    { table: 'integrations', column: 'created_by', definition: 'INT' },
+
+    // --- email_templates ---
+    { table: 'email_templates', column: 'placeholders', definition: 'JSON' },
+
+    // --- workflows ---
+    { table: 'workflows', column: 'trigger_field', definition: 'VARCHAR(100)' },
+    { table: 'workflows', column: 'execution_count', definition: 'INT DEFAULT 0' },
+    { table: 'workflows', column: 'last_executed_at', definition: 'TIMESTAMP NULL' },
+
+    // --- audiences ---
+    { table: 'audiences', column: 'type', definition: "ENUM('static','dynamic') DEFAULT 'static'" },
+    { table: 'audiences', column: 'tags', definition: 'JSON' },
+    { table: 'audiences', column: 'is_active', definition: 'TINYINT(1) DEFAULT 1' },
+    { table: 'audiences', column: 'last_synced_at', definition: 'DATETIME' },
+
+    // --- custom_fields ---
+    { table: 'custom_fields', column: 'field_label_ar', definition: 'VARCHAR(255)' },
+    { table: 'custom_fields', column: 'placeholder', definition: 'VARCHAR(255)' },
+    { table: 'custom_fields', column: 'is_unique', definition: 'TINYINT(1) DEFAULT 0' },
+    { table: 'custom_fields', column: 'is_active', definition: 'TINYINT(1) DEFAULT 1' },
+    { table: 'custom_fields', column: 'validation', definition: 'JSON' },
+    { table: 'custom_fields', column: 'description', definition: 'TEXT' },
+    { table: 'custom_fields', column: 'created_by', definition: 'INT' },
+  ];
+
+  for (const { table, column, definition } of columnMigrations) {
+    try {
+      await execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      console.log(`  Added ${table}.${column}`);
+    } catch (e) {
+      // Column already exists or table doesn't exist yet – skip silently
+    }
+  }
+
+  // ============================================================
+  // Fix NOT NULL constraints on columns that routes don't populate
+  // (table was created by createTables with columns the route
+  //  doesn't use; those NOT NULL cols block INSERTs)
+  // ============================================================
+  const modifyMigrations = [
+    // documents: createTables has "name NOT NULL" but route uses "title"
+    { table: 'documents', sql: 'ALTER TABLE documents MODIFY COLUMN name VARCHAR(255) NULL' },
+    // inbox_conversations: createTables has "channel NOT NULL" but route INSERT doesn't set it
+    { table: 'inbox_conversations', sql: 'ALTER TABLE inbox_conversations MODIFY COLUMN channel VARCHAR(50) NULL' },
+    // inbox_messages: createTables has "direction NOT NULL" but route INSERT doesn't set it
+    { table: 'inbox_messages', sql: 'ALTER TABLE inbox_messages MODIFY COLUMN direction ENUM(\'inbound\', \'outbound\') NULL' },
+  ];
+
+  for (const { table, sql } of modifyMigrations) {
+    try {
+      await execute(sql);
+      console.log(`  Modified ${table} column constraint`);
+    } catch (e) {
+      // Column or table might not exist
+    }
+  }
+
   console.log('Multi-tenant migrations completed');
 }
 
@@ -843,6 +1103,27 @@ async function createDefaultTenantAndAdmin() {
       [JSON.stringify({ super_admin: true, platform_owner: true, manage_tenants: true, manage_all: true })]
     );
     console.log('Updated osama as Platform Super Admin');
+  }
+
+  // Seed super_admins table for the Super Admin portal
+  const [saExists] = await pool.execute("SELECT id FROM super_admins WHERE username = 'trasealla_admin'");
+  const saHash = await bcrypt.default.hash('Trasealla@2025!', 10);
+  if (saExists.length === 0) {
+    await execute(
+      `INSERT INTO super_admins (username, email, password, full_name, role, permissions) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        'trasealla_admin',
+        'admin@trasealla.com',
+        saHash,
+        'Trasealla Super Admin',
+        'super_admin',
+        JSON.stringify({ super_admin: true, platform_owner: true, manage_tenants: true, manage_all: true })
+      ]
+    );
+    console.log('Super Admin portal user created: trasealla_admin');
+  } else {
+    // Always ensure the password is up-to-date
+    await execute('UPDATE super_admins SET password = ? WHERE username = ?', [saHash, 'trasealla_admin']);
   }
   
   // Create or update Trasealla tenant admin

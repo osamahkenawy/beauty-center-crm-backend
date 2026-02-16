@@ -311,6 +311,161 @@ router.patch('/:id', async (req, res) => {
 });
 
 /**
+ * Checkout appointment — Complete + Auto-create invoice + optional payment
+ * This is the main "done" flow: one click to finish the appointment.
+ * 
+ * Body (all optional):
+ *   payment_method: 'cash' | 'card' | 'bank_transfer' | 'gift_card' | 'other'
+ *   discount_amount: number
+ *   discount_type: 'fixed' | 'percentage'
+ *   tax_rate: number (default 5)
+ *   tip: number
+ *   notes: string
+ *   pay_now: boolean (if true, marks invoice as paid immediately)
+ */
+router.post('/:id/checkout', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenantId;
+    const {
+      payment_method = 'cash',
+      discount_amount = 0,
+      discount_type = 'fixed',
+      tax_rate = 5,
+      tip = 0,
+      notes,
+      pay_now = true
+    } = req.body;
+
+    // 1. Get the appointment with full details
+    const [apt] = await query(
+      `SELECT a.*, 
+              p.name as service_name, p.unit_price, p.currency,
+              c.first_name as customer_first_name, c.last_name as customer_last_name,
+              s.full_name as staff_name
+       FROM appointments a
+       LEFT JOIN products p ON a.service_id = p.id
+       LEFT JOIN contacts c ON a.customer_id = c.id
+       LEFT JOIN staff s ON a.staff_id = s.id
+       WHERE a.id = ? AND a.tenant_id = ?`,
+      [id, tenantId]
+    );
+
+    if (!apt) {
+      return res.status(404).json({ success: false, message: 'Appointment not found' });
+    }
+
+    if (apt.status === 'completed') {
+      // Already completed — check if invoice exists
+      const [existingInv] = await query(
+        'SELECT id, invoice_number, status, total FROM invoices WHERE appointment_id = ? AND tenant_id = ?',
+        [id, tenantId]
+      );
+      if (existingInv) {
+        return res.json({
+          success: true,
+          message: 'Appointment already checked out',
+          data: { appointment_id: parseInt(id), invoice_id: existingInv.id, invoice_number: existingInv.invoice_number, total: existingInv.total }
+        });
+      }
+    }
+
+    if (apt.status === 'cancelled' || apt.status === 'no_show') {
+      return res.status(400).json({ success: false, message: `Cannot checkout a ${apt.status} appointment` });
+    }
+
+    // 2. Mark appointment as completed
+    await execute(
+      `UPDATE appointments SET status = 'completed', customer_showed = 1, payment_status = ? WHERE id = ? AND tenant_id = ?`,
+      [pay_now ? 'paid' : 'pending', id, tenantId]
+    );
+
+    // 3. Check if invoice already exists
+    const [existingInvoice] = await query(
+      'SELECT id, invoice_number FROM invoices WHERE appointment_id = ? AND tenant_id = ?',
+      [id, tenantId]
+    );
+
+    let invoiceId, invoiceNumber;
+
+    if (existingInvoice) {
+      invoiceId = existingInvoice.id;
+      invoiceNumber = existingInvoice.invoice_number;
+    } else {
+      // 4. Generate invoice number
+      const [lastInv] = await query(
+        "SELECT invoice_number FROM invoices WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
+        [tenantId]
+      );
+      const lastNum = lastInv?.invoice_number ? parseInt(lastInv.invoice_number.replace('INV-', '')) || 0 : 0;
+      invoiceNumber = `INV-${String(lastNum + 1).padStart(4, '0')}`;
+
+      // 5. Calculate totals
+      const subtotal = parseFloat(apt.unit_price || 0) + parseFloat(tip || 0);
+      const disc = discount_type === 'percentage' 
+        ? subtotal * (parseFloat(discount_amount) / 100) 
+        : parseFloat(discount_amount || 0);
+      const afterDiscount = subtotal - disc;
+      const taxAmount = afterDiscount * (parseFloat(tax_rate) / 100);
+      const total = afterDiscount + taxAmount;
+      const amountPaid = pay_now ? total : 0;
+
+      // 6. Create invoice
+      const invResult = await execute(`
+        INSERT INTO invoices (tenant_id, appointment_id, customer_id, staff_id,
+          invoice_number, subtotal, discount_amount, discount_type, tax_rate, tax_amount,
+          total, amount_paid, currency, status, payment_method, paid_at, notes, created_by)
+        VALUES (?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?,?,?,?)
+      `, [
+        tenantId, id, apt.customer_id, apt.staff_id,
+        invoiceNumber, subtotal, disc, discount_type, tax_rate, taxAmount,
+        total, amountPaid, apt.currency || 'AED',
+        pay_now ? 'paid' : 'sent',
+        payment_method,
+        pay_now ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
+        notes || null,
+        req.user?.id || null
+      ]);
+
+      invoiceId = invResult.insertId;
+
+      // 7. Add line items
+      await execute(`
+        INSERT INTO invoice_items (invoice_id, item_type, item_id, name, quantity, unit_price, total)
+        VALUES (?, 'service', ?, ?, 1, ?, ?)
+      `, [invoiceId, apt.service_id, apt.service_name || 'Service', parseFloat(apt.unit_price || 0), parseFloat(apt.unit_price || 0)]);
+
+      // Add tip as a separate line item if present
+      if (parseFloat(tip) > 0) {
+        await execute(`
+          INSERT INTO invoice_items (invoice_id, item_type, name, quantity, unit_price, total)
+          VALUES (?, 'custom', 'Tip', 1, ?, ?)
+        `, [invoiceId, parseFloat(tip), parseFloat(tip)]);
+      }
+    }
+
+    // 8. Return result
+    const [invoice] = await query('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
+
+    res.json({
+      success: true,
+      message: pay_now ? 'Appointment checked out & paid' : 'Appointment completed — invoice created',
+      data: {
+        appointment_id: parseInt(id),
+        invoice_id: invoiceId,
+        invoice_number: invoiceNumber,
+        total: invoice?.total || 0,
+        status: invoice?.status || 'sent',
+        payment_method
+      }
+    });
+  } catch (error) {
+    console.error('Checkout appointment error:', error);
+    res.status(500).json({ success: false, message: 'Server error: ' + error.message });
+  }
+});
+
+/**
  * Delete appointment
  */
 router.delete('/:id', async (req, res) => {

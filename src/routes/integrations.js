@@ -275,8 +275,7 @@ router.get('/:id/logs', authMiddleware, async (req, res) => {
     const params = [req.params.id];
     
     if (status) { sql += ' AND status = ?'; params.push(status); }
-    sql += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(parseInt(limit));
+    sql += ` ORDER BY created_at DESC LIMIT ${parseInt(limit)}`;
     
     const logs = await query(sql, params);
     res.json({ success: true, data: logs });

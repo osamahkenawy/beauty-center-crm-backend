@@ -19,7 +19,7 @@ router.get('/', async (req, res) => {
        FROM loyalty_points lp
        LEFT JOIN contacts c ON lp.customer_id = c.id
        WHERE lp.tenant_id = ?
-       ORDER BY lp.current_points DESC`,
+       ORDER BY lp.points DESC`,
       [tenantId]
     );
     res.json({ success: true, data: members });
@@ -51,7 +51,7 @@ router.post('/', async (req, res) => {
     }
 
     const result = await execute(
-      `INSERT INTO loyalty_points (tenant_id, customer_id, current_points, total_earned, tier)
+      `INSERT INTO loyalty_points (tenant_id, customer_id, points, total_earned, tier)
        VALUES (?, ?, 0, 0, ?)`,
       [tenantId, customer_id, tier || 'bronze']
     );
@@ -92,13 +92,22 @@ router.get('/:id/transactions', async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenantId;
 
-    const transactions = await query(
-      `SELECT lt.* FROM loyalty_transactions lt
-       JOIN loyalty_points lp ON lt.loyalty_id = lp.id
-       WHERE lt.loyalty_id = ? AND lp.tenant_id = ?
-       ORDER BY lt.created_at DESC
-       LIMIT 50`,
+    // First get the loyalty member to find the customer_id
+    const [member] = await query(
+      'SELECT * FROM loyalty_points WHERE id = ? AND tenant_id = ?',
       [id, tenantId]
+    );
+
+    if (!member) {
+      return res.status(404).json({ success: false, message: 'Loyalty member not found' });
+    }
+
+    const transactions = await query(
+      `SELECT * FROM loyalty_transactions 
+       WHERE tenant_id = ? AND customer_id = ?
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [tenantId, member.customer_id]
     );
 
     res.json({ success: true, data: transactions });
@@ -114,11 +123,17 @@ router.get('/:id/transactions', async (req, res) => {
 router.post('/:id/transaction', async (req, res) => {
   try {
     const { id } = req.params;
-    const { points, type, description } = req.body;
+    const { points, type, description, reference_type, reference_id } = req.body;
     const tenantId = req.tenantId;
 
     if (!points || !type) {
       return res.status(400).json({ success: false, message: 'Points and type are required' });
+    }
+
+    // Validate type
+    const validTypes = ['earn', 'redeem', 'expire', 'adjust'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ success: false, message: `Type must be one of: ${validTypes.join(', ')}` });
     }
 
     const parsedPoints = parseInt(points, 10);
@@ -136,31 +151,36 @@ router.post('/:id/transaction', async (req, res) => {
     }
 
     // For redemptions, check sufficient points
-    if (type === 'redeemed' && member.current_points < parsedPoints) {
+    if (type === 'redeem' && member.points < parsedPoints) {
       return res.status(400).json({ success: false, message: 'Insufficient points for redemption' });
     }
 
     // Insert transaction
     await execute(
-      `INSERT INTO loyalty_transactions (loyalty_id, type, points, description)
-       VALUES (?, ?, ?, ?)`,
-      [id, type, parsedPoints, description || null]
+      `INSERT INTO loyalty_transactions (tenant_id, customer_id, points, transaction_type, description, reference_type, reference_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [tenantId, member.customer_id, parsedPoints, type, description || null, reference_type || null, reference_id || null]
     );
 
     // Update points
-    if (type === 'earned') {
+    if (type === 'earn') {
       await execute(
-        'UPDATE loyalty_points SET current_points = current_points + ?, total_earned = total_earned + ? WHERE id = ?',
+        'UPDATE loyalty_points SET points = points + ?, total_earned = total_earned + ? WHERE id = ?',
         [parsedPoints, parsedPoints, id]
       );
-    } else if (type === 'redeemed') {
+    } else if (type === 'redeem') {
       await execute(
-        'UPDATE loyalty_points SET current_points = current_points - ? WHERE id = ?',
+        'UPDATE loyalty_points SET points = points - ?, total_redeemed = total_redeemed + ? WHERE id = ?',
+        [parsedPoints, parsedPoints, id]
+      );
+    } else if (type === 'adjust') {
+      await execute(
+        'UPDATE loyalty_points SET points = ? WHERE id = ?',
         [parsedPoints, id]
       );
-    } else if (type === 'adjusted') {
+    } else if (type === 'expire') {
       await execute(
-        'UPDATE loyalty_points SET current_points = ? WHERE id = ?',
+        'UPDATE loyalty_points SET points = points - ? WHERE id = ?',
         [parsedPoints, id]
       );
     }
