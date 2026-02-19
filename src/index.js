@@ -49,6 +49,15 @@ import packagesRoutes from './routes/packages.js';
 import membershipsRoutes from './routes/memberships.js';
 import promotionsRoutes from './routes/promotions.js';
 import reviewsRoutes from './routes/reviews.js';
+import posRoutes from './routes/pos.js';
+import consultationFormsRoutes from './routes/consultation-forms.js';
+import groupBookingsRoutes from './routes/group-bookings.js';
+import patchTestsRoutes from './routes/patch-tests.js';
+import clientProfilesRoutes from './routes/client-profiles.js';
+import inventoryRoutes from './routes/inventory.js';
+import notificationsRoutes from './routes/notifications.js';
+import publicBookingRoutes from './routes/public-booking.js';
+import rolesRoutes from './routes/roles.js';
 
 const app = express();
 
@@ -88,6 +97,7 @@ app.get('/api/health', (req, res) => {
 // Public routes (no tenant context required)
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantsRoutes);
+app.use('/api/public/booking', publicBookingRoutes);
 
 // Super Admin routes (Trasealla platform management)
 app.use('/api/super-admin', superAdminRoutes);
@@ -133,6 +143,15 @@ app.use('/api/packages', packagesRoutes);
 app.use('/api/memberships', membershipsRoutes);
 app.use('/api/promotions', promotionsRoutes);
 app.use('/api/reviews', reviewsRoutes);
+app.use('/api/pos', posRoutes);
+app.use('/api/consultation-forms', consultationFormsRoutes);
+app.use('/api/group-bookings', groupBookingsRoutes);
+app.use('/api/patch-tests', patchTestsRoutes);
+app.use('/api/client-profiles', clientProfilesRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/notifications', notificationsRoutes);
+app.use('/api/roles', rolesRoutes);
+app.use('/api/booking-settings', publicBookingRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -159,17 +178,15 @@ async function start() {
 ║  📊 Health:    http://localhost:${config.port}/api/health             ║
 ║  🏢 Tenants:   http://localhost:${config.port}/api/tenants            ║
 ╠════════════════════════════════════════════════════════════════╣
-║  🔑 SUPER ADMIN (Trasealla Platform Management):               ║
-║  👤 Username:  trasealla_admin                                 ║
-║  📧 Email:     admin@trasealla.com                             ║
-║  🔐 Password:  Trasealla@2025!                                 ║
-║  🌐 Portal:    http://localhost:5173/super-admin               ║
+║  🔑 SUPER ADMIN (Platform):                                    ║
+║     trasealla_admin / Trasealla@2025!                          ║
 ╠════════════════════════════════════════════════════════════════╣
-║  DEMO TENANT LOGIN:                                            ║
-║  👤 Username:  admin                                           ║
-║  🔐 Password:  Trasealla123                                    ║
-║  👤 Username:  demo                                            ║
-║  🔐 Password:  demo123                                         ║
+║  DEMO TENANT USERS (Role-Based):                               ║
+║  👑 admin          / admin123       (Admin / Owner)             ║
+║  📋 manager_demo   / Manager123    (Manager)                   ║
+║  💁 reception_demo / Reception123  (Receptionist)              ║
+║  💇 stylist_demo   / Stylist123    (Stylist)                   ║
+║  👤 demo           / demo123       (Staff)                     ║
 ╚════════════════════════════════════════════════════════════════╝
       `);
     });

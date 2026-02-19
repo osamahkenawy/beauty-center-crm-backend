@@ -1,6 +1,7 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { redeemGiftCard } from './gift-cards.js';
 
 const router = express.Router();
 
@@ -15,11 +16,37 @@ const toMySQLDateTime = (isoString) => {
 };
 
 /**
- * Create appointment
+ * Ensure promo columns exist on appointments table
+ */
+async function ensurePromoColumns() {
+  const columns = [
+    ['promotion_id', 'INT DEFAULT NULL'],
+    ['discount_code_id', 'INT DEFAULT NULL'],
+    ['promo_code', 'VARCHAR(50) DEFAULT NULL'],
+    ['discount_amount', 'DECIMAL(10,2) DEFAULT 0'],
+    ['discount_type', "VARCHAR(20) DEFAULT 'fixed'"],
+    ['original_price', 'DECIMAL(10,2) DEFAULT 0'],
+    ['final_price', 'DECIMAL(10,2) DEFAULT 0']
+  ];
+  for (const [col, def] of columns) {
+    try {
+      await execute(`ALTER TABLE appointments ADD COLUMN ${col} ${def}`);
+    } catch (e) {
+      // Column already exists – that's fine
+    }
+  }
+}
+
+/**
+ * Create appointment (with optional promo code)
  */
 router.post('/', async (req, res) => {
   try {
-    const { customer_id, service_id, staff_id, start_time, end_time, notes } = req.body;
+    await ensurePromoColumns();
+    const {
+      customer_id, service_id, staff_id, start_time, end_time, notes,
+      promo_code, promotion_id, discount_code_id, discount_amount = 0, discount_type = 'fixed'
+    } = req.body;
     const tenantId = req.tenantId;
 
     if (!customer_id || !service_id || !staff_id || !start_time || !end_time) {
@@ -52,12 +79,73 @@ router.post('/', async (req, res) => {
       });
     }
 
+    // Get service price for promo calculations
+    const [svc] = await query('SELECT unit_price FROM products WHERE id = ?', [service_id]);
+    const originalPrice = parseFloat(svc?.unit_price || 0);
+
+    // Validate & calculate promo discount if promo_code provided
+    let validatedPromoId = promotion_id || null;
+    let validatedCodeId = discount_code_id || null;
+    let appliedDiscount = parseFloat(discount_amount) || 0;
+    let appliedType = discount_type;
+
+    if (promo_code && !validatedPromoId) {
+      // Server-side validation of the promo code
+      const [dc] = await query(`
+        SELECT dc.id as code_id, dc.promotion_id, p.type, p.discount_value, p.is_active,
+               p.start_date, p.end_date, p.min_spend, p.applies_to, p.service_ids, p.category_ids,
+               dc.max_uses, dc.used_count
+        FROM discount_codes dc
+        LEFT JOIN promotions p ON dc.promotion_id = p.id
+        WHERE dc.code = ? AND dc.tenant_id = ? AND dc.is_active = 1
+      `, [promo_code, tenantId]);
+
+      if (dc && dc.is_active) {
+        const now = new Date();
+        const startOk = !dc.start_date || new Date(dc.start_date) <= now;
+        const endOk = !dc.end_date || new Date(dc.end_date) >= now;
+        const usageOk = !dc.max_uses || dc.used_count < dc.max_uses;
+
+        if (startOk && endOk && usageOk) {
+          validatedPromoId = dc.promotion_id;
+          validatedCodeId = dc.code_id;
+          appliedType = dc.type === 'percentage' ? 'percentage' : 'fixed';
+          appliedDiscount = dc.type === 'percentage'
+            ? originalPrice * (dc.discount_value / 100)
+            : parseFloat(dc.discount_value || 0);
+        }
+      }
+    }
+
+    const finalPrice = Math.max(0, originalPrice - appliedDiscount);
+
     // Create appointment
     const result = await execute(
-      `INSERT INTO appointments (tenant_id, customer_id, service_id, staff_id, start_time, end_time, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [tenantId, customer_id, service_id, staff_id, mysqlStartTime, mysqlEndTime, notes, req.user.id]
+      `INSERT INTO appointments (tenant_id, customer_id, service_id, staff_id, start_time, end_time, notes,
+        promotion_id, discount_code_id, promo_code, discount_amount, discount_type, original_price, final_price, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [tenantId, customer_id, service_id, staff_id, mysqlStartTime, mysqlEndTime, notes || null,
+        validatedPromoId, validatedCodeId, promo_code || null, appliedDiscount, appliedType, originalPrice, finalPrice, req.user.id]
     );
+
+    // Record promo usage
+    if (validatedCodeId || validatedPromoId) {
+      try {
+        await execute(`
+          INSERT INTO discount_usage (discount_code_id, promotion_id, customer_id, appointment_id, discount_amount)
+          VALUES (?, ?, ?, ?, ?)
+        `, [validatedCodeId, validatedPromoId, customer_id, result.insertId, appliedDiscount]);
+
+        if (validatedCodeId) {
+          await execute('UPDATE discount_codes SET used_count = used_count + 1 WHERE id = ?', [validatedCodeId]);
+        }
+        if (validatedPromoId) {
+          await execute('UPDATE promotions SET used_count = used_count + 1 WHERE id = ?', [validatedPromoId]);
+        }
+      } catch (promoErr) {
+        console.warn('Could not record promo usage:', promoErr.message);
+      }
+    }
 
     // Create reminder (24 hours before) - optional, don't fail if table doesn't exist
     try {
@@ -71,7 +159,6 @@ router.post('/', async (req, res) => {
       );
     } catch (reminderError) {
       console.warn('Could not create appointment reminder:', reminderError.message);
-      // Don't fail the appointment creation if reminder fails
     }
 
     // Get created appointment with details
@@ -91,7 +178,9 @@ router.post('/', async (req, res) => {
     res.status(201).json({
       success: true,
       data: appointment,
-      message: 'Appointment created successfully'
+      message: appliedDiscount > 0
+        ? `Appointment booked! Promo applied — saved ${appliedDiscount.toFixed(2)}`
+        : 'Appointment created successfully'
     });
   } catch (error) {
     console.error('Error creating appointment:', error);
@@ -329,6 +418,7 @@ router.post('/:id/checkout', async (req, res) => {
     const tenantId = req.tenantId;
     const {
       payment_method = 'cash',
+      gift_card_code,
       discount_amount = 0,
       discount_type = 'fixed',
       tax_rate = 5,
@@ -336,6 +426,11 @@ router.post('/:id/checkout', async (req, res) => {
       notes,
       pay_now = true
     } = req.body;
+
+    // Require gift card code when paying by gift card
+    if (payment_method === 'gift_card' && !gift_card_code) {
+      return res.status(400).json({ success: false, message: 'Gift card code is required for gift card payments' });
+    }
 
     // 1. Get the appointment with full details
     const [apt] = await query(
@@ -400,11 +495,14 @@ router.post('/:id/checkout', async (req, res) => {
       const lastNum = lastInv?.invoice_number ? parseInt(lastInv.invoice_number.replace('INV-', '')) || 0 : 0;
       invoiceNumber = `INV-${String(lastNum + 1).padStart(4, '0')}`;
 
-      // 5. Calculate totals
-      const subtotal = parseFloat(apt.unit_price || 0) + parseFloat(tip || 0);
-      const disc = discount_type === 'percentage' 
+      // 5. Calculate totals (include promo discount from booking if any)
+      const basePrice = parseFloat(apt.unit_price || 0);
+      const promoDiscount = parseFloat(apt.discount_amount || 0); // Already saved at booking time
+      const subtotal = basePrice + parseFloat(tip || 0);
+      const checkoutDisc = discount_type === 'percentage' 
         ? subtotal * (parseFloat(discount_amount) / 100) 
         : parseFloat(discount_amount || 0);
+      const disc = promoDiscount + checkoutDisc; // Total discount = promo + checkout manual
       const afterDiscount = subtotal - disc;
       const taxAmount = afterDiscount * (parseFloat(tax_rate) / 100);
       const total = afterDiscount + taxAmount;
@@ -444,7 +542,26 @@ router.post('/:id/checkout', async (req, res) => {
       }
     }
 
-    // 8. Return result
+    // 8. If paying with gift card, redeem now
+    let giftCardResult = null;
+    if (payment_method === 'gift_card' && pay_now && gift_card_code) {
+      const [inv] = await query('SELECT total FROM invoices WHERE id = ?', [invoiceId]);
+      const redeemAmount = parseFloat(inv?.total || 0);
+      if (redeemAmount > 0) {
+        giftCardResult = await redeemGiftCard(tenantId, gift_card_code, redeemAmount, {
+          invoice_id: invoiceId,
+          created_by: req.user?.id
+        });
+        if (!giftCardResult.success) {
+          // Rollback: revert appointment & invoice to unpaid state
+          await execute("UPDATE appointments SET payment_status = 'pending' WHERE id = ? AND tenant_id = ?", [id, tenantId]);
+          await execute("UPDATE invoices SET status = 'sent', amount_paid = 0, paid_at = NULL WHERE id = ?", [invoiceId]);
+          return res.status(400).json({ success: false, message: giftCardResult.message });
+        }
+      }
+    }
+
+    // 9. Return result
     const [invoice] = await query('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
 
     res.json({
@@ -456,7 +573,8 @@ router.post('/:id/checkout', async (req, res) => {
         invoice_number: invoiceNumber,
         total: invoice?.total || 0,
         status: invoice?.status || 'sent',
-        payment_method
+        payment_method,
+        gift_card: giftCardResult
       }
     });
   } catch (error) {

@@ -32,7 +32,7 @@ export function verifyToken(token) {
 
 /**
  * Authentication middleware
- * Validates JWT and loads full user data
+ * Validates JWT and loads full user data + role-based permissions
  */
 export async function authMiddleware(req, res, next) {
   try {
@@ -66,6 +66,26 @@ export async function authMiddleware(req, res, next) {
       }
     }
     
+    // Load role-based permissions from roles table
+    if (user.tenant_id && user.role) {
+      try {
+        const roleRows = await query(
+          'SELECT permissions FROM roles WHERE tenant_id = ? AND name = ? AND is_active = 1',
+          [user.tenant_id, user.role]
+        );
+        if (roleRows.length > 0) {
+          let rolePerms = roleRows[0].permissions;
+          if (typeof rolePerms === 'string') {
+            try { rolePerms = JSON.parse(rolePerms); } catch { rolePerms = {}; }
+          }
+          user.rolePermissions = rolePerms || {};
+        }
+      } catch {
+        // roles table might not exist yet — that's fine
+      }
+    }
+    if (!user.rolePermissions) user.rolePermissions = {};
+    
     req.user = user;
     req.tenantId = user.tenant_id; // Set tenant ID from user
     
@@ -77,14 +97,23 @@ export async function authMiddleware(req, res, next) {
 }
 
 /**
+ * Check if user has full access (admin, super_admin, owner, or all-permissions)
+ */
+function hasFullAccess(user) {
+  if (!user) return false;
+  const role = user.role;
+  const perms = user.permissions || {};
+  return role === 'admin' || role === 'super_admin' || user.is_owner === 1 || perms.all || perms.platform_owner;
+}
+
+/**
  * Admin only middleware
- * Allows admin and super_admin roles
+ * Allows admin, super_admin, manager, and owner
  */
 export function adminOnly(req, res, next) {
-  if (!req.user || !['admin', 'super_admin'].includes(req.user.role)) {
-    return res.status(403).json({ success: false, message: 'Admin access required' });
-  }
-  next();
+  if (hasFullAccess(req.user)) return next();
+  if (req.user?.role === 'manager') return next();
+  return res.status(403).json({ success: false, message: 'Admin access required' });
 }
 
 /**
@@ -114,37 +143,25 @@ export function platformOwnerOnly(req, res, next) {
  * Allows tenant owner, admin/manager role, staff with write permission, or platform owner
  */
 export function tenantOwnerOnly(req, res, next) {
+  if (hasFullAccess(req.user)) return next();
   const role = req.user?.role;
-  const isOwner = req.user?.is_owner;
-  const isPlatformOwner = req.user?.permissions?.platform_owner;
-  const isAdminRole = role === 'admin' || role === 'manager';
-  const hasAll = req.user?.permissions?.all;
+  if (role === 'manager') return next();
   const hasWrite = req.user?.permissions?.write;
-
-  if (!isOwner && !isPlatformOwner && !isAdminRole && !hasAll && !hasWrite) {
-    return res.status(403).json({ success: false, message: 'Write access required' });
-  }
-  next();
+  if (hasWrite) return next();
+  return res.status(403).json({ success: false, message: 'Write access required' });
 }
 
 /**
- * Check specific permission
+ * Check specific permission (legacy)
  */
 export function hasPermission(permission) {
   return (req, res, next) => {
+    if (hasFullAccess(req.user)) return next();
+    
     const perms = req.user?.permissions || {};
+    if (perms[permission]) return next();
     
-    // Platform owners and super admins have all permissions
-    if (perms.all || perms.super_admin || perms.platform_owner) {
-      return next();
-    }
-    
-    // Check specific permission
-    if (!perms[permission]) {
-      return res.status(403).json({ success: false, message: `Permission '${permission}' required` });
-    }
-    
-    next();
+    return res.status(403).json({ success: false, message: `Permission '${permission}' required` });
   };
 }
 
@@ -158,10 +175,8 @@ export function requireRole(...allowedRoles) {
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
     
-    // Platform owners can access everything
-    if (req.user.permissions?.platform_owner) {
-      return next();
-    }
+    // Admin / owner always passes
+    if (hasFullAccess(req.user)) return next();
     
     if (!allowedRoles.includes(req.user.role)) {
       return res.status(403).json({ 
@@ -171,5 +186,36 @@ export function requireRole(...allowedRoles) {
     }
     
     next();
+  };
+}
+
+/**
+ * Module-level permission check using the roles table permissions
+ * Usage: canAccess('appointments', 'create')
+ * Checks if the user's role has the specified action on the module
+ */
+export function canAccess(module, action = 'view') {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    
+    // Admin / owner / super_admin always has full access
+    if (hasFullAccess(req.user)) return next();
+    
+    // Check role-based permissions loaded from DB
+    const rolePerms = req.user.rolePermissions || {};
+    const modulePerms = rolePerms[module] || {};
+    
+    if (modulePerms[action]) return next();
+    
+    // Fallback to legacy permissions object
+    const legacyPerms = req.user.permissions || {};
+    if (legacyPerms.all || legacyPerms[module]) return next();
+    
+    return res.status(403).json({
+      success: false,
+      message: `Access denied. You need '${action}' permission for '${module}'.`
+    });
   };
 }

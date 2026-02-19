@@ -1,6 +1,8 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { processAutoEarn } from './loyalty.js';
+import { redeemGiftCard } from './gift-cards.js';
 
 const router = express.Router();
 
@@ -172,16 +174,40 @@ router.post('/', async (req, res) => {
   try {
     await ensureTables();
     const t = req.tenantId;
+    // Get tenant currency as default
+    let tenantCurrency = 'AED';
+    try {
+      const [tenant] = await query('SELECT currency, settings FROM tenants WHERE id = ?', [t]);
+      if (tenant) {
+        tenantCurrency = tenant.currency || 'AED';
+        // Also check settings for default tax rate
+        if (tenant.settings) {
+          try {
+            const settings = typeof tenant.settings === 'string' ? JSON.parse(tenant.settings) : tenant.settings;
+            if (settings.default_tax_rate !== undefined && req.body.tax_rate === undefined) {
+              req.body.tax_rate = parseFloat(settings.default_tax_rate) || 0;
+            }
+          } catch (e) { /* ignore */ }
+        }
+      }
+    } catch (e) { /* use default */ }
+
     const {
       branch_id, appointment_id, customer_id, staff_id,
       items = [], discount_amount: rawDiscount, discount_value, discount_type = 'fixed',
-      tax_rate = 0, currency = 'AED', payment_method, notes, due_date, status = 'draft'
+      tax_rate = 0, currency = tenantCurrency, payment_method, notes, due_date, status = 'draft'
     } = req.body;
     // Accept both discount_amount and discount_value
     const discount_amount = parseFloat(rawDiscount ?? discount_value ?? 0);
 
     if (!customer_id) return res.status(400).json({ success: false, message: 'Customer is required' });
     if (!items.length) return res.status(400).json({ success: false, message: 'At least one item is required' });
+
+    // Validate item prices are non-negative
+    for (const item of items) {
+      if ((item.unit_price || 0) < 0) return res.status(400).json({ success: false, message: 'Item prices cannot be negative' });
+      if ((item.quantity || 1) < 1) return res.status(400).json({ success: false, message: 'Item quantity must be at least 1' });
+    }
 
     const invoiceNumber = await getNextInvoiceNumber(t);
 
@@ -268,12 +294,19 @@ router.post('/from-appointment/:appointmentId', async (req, res) => {
     const taxAmount = (subtotal - disc) * (tax_rate / 100);
     const total = subtotal - disc + taxAmount;
 
+    // Get tenant currency as fallback
+    let fallbackCurrency = 'AED';
+    try {
+      const [tenant] = await query('SELECT currency FROM tenants WHERE id = ?', [t]);
+      if (tenant?.currency) fallbackCurrency = tenant.currency;
+    } catch (e) { /* ignore */ }
+
     const result = await execute(`
       INSERT INTO invoices (tenant_id, appointment_id, customer_id, staff_id,
         invoice_number, subtotal, discount_amount, tax_rate, tax_amount,
         total, currency, status, created_by)
       VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?,?)
-    `, [t, appointmentId, apt.customer_id, apt.staff_id, invoiceNumber, subtotal, disc, tax_rate, taxAmount, total, apt.currency || 'AED', 'draft', req.user?.id || null]);
+    `, [t, appointmentId, apt.customer_id, apt.staff_id, invoiceNumber, subtotal, disc, tax_rate, taxAmount, total, apt.currency || fallbackCurrency, 'draft', req.user?.id || null]);
 
     const invoiceId = result.insertId;
 
@@ -328,6 +361,17 @@ router.patch('/:id', async (req, res) => {
     params.push(req.params.id, req.tenantId);
     await execute(`UPDATE invoices SET ${updates.join(', ')} WHERE id = ? AND tenant_id = ?`, params);
 
+    // Auto-earn loyalty points when marking as paid
+    if (req.body.status === 'paid') {
+      const [paidInv] = await query('SELECT customer_id, total FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
+      if (paidInv?.customer_id && paidInv?.total > 0) {
+        const loyaltyResult = await processAutoEarn(req.tenantId, paidInv.customer_id, parseFloat(paidInv.total), parseInt(req.params.id));
+        if (loyaltyResult) {
+          return res.json({ success: true, message: 'Invoice updated', loyalty: loyaltyResult });
+        }
+      }
+    }
+
     res.json({ success: true, message: 'Invoice updated' });
   } catch (error) {
     console.error('Update invoice error:', error);
@@ -338,11 +382,28 @@ router.patch('/:id', async (req, res) => {
 // ── Record payment ──
 router.post('/:id/pay', async (req, res) => {
   try {
-    const { amount, payment_method = 'cash' } = req.body;
+    const { amount, payment_method = 'cash', gift_card_code } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Valid amount required' });
+
+    // Require gift card code when paying by gift card
+    if (payment_method === 'gift_card' && !gift_card_code) {
+      return res.status(400).json({ success: false, message: 'Gift card code is required for gift card payments' });
+    }
 
     const [inv] = await query('SELECT * FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    // If gift card, validate and redeem BEFORE recording payment
+    let giftCardResult = null;
+    if (payment_method === 'gift_card' && gift_card_code) {
+      giftCardResult = await redeemGiftCard(req.tenantId, gift_card_code, parseFloat(amount), {
+        invoice_id: parseInt(req.params.id),
+        created_by: req.user?.id
+      });
+      if (!giftCardResult.success) {
+        return res.status(400).json({ success: false, message: giftCardResult.message });
+      }
+    }
 
     const newPaid = parseFloat(inv.amount_paid || 0) + parseFloat(amount);
     const newStatus = newPaid >= parseFloat(inv.total) ? 'paid' : 'partially_paid';
@@ -352,7 +413,19 @@ router.post('/:id/pay', async (req, res) => {
       WHERE id = ? AND tenant_id = ?
     `, [newPaid, newStatus, payment_method, newStatus, req.params.id, req.tenantId]);
 
-    res.json({ success: true, data: { amount_paid: newPaid, status: newStatus }, message: `Payment of ${amount} recorded` });
+    // Auto-earn loyalty points when fully paid
+    let loyaltyResult = null;
+    if (newStatus === 'paid' && inv.customer_id && inv.total > 0) {
+      loyaltyResult = await processAutoEarn(req.tenantId, inv.customer_id, parseFloat(inv.total), parseInt(req.params.id));
+    }
+
+    res.json({ 
+      success: true, 
+      data: { amount_paid: newPaid, status: newStatus }, 
+      message: `Payment of ${amount} recorded${giftCardResult ? ` (Gift card: ${giftCardResult.message})` : ''}${loyaltyResult ? ` (+${loyaltyResult.points_earned} loyalty points)` : ''}`,
+      loyalty: loyaltyResult,
+      gift_card: giftCardResult
+    });
   } catch (error) {
     console.error('Record payment error:', error);
     res.status(500).json({ success: false, message: 'Server error' });

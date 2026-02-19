@@ -174,7 +174,7 @@ async function createTables() {
       full_name VARCHAR(100),
       phone VARCHAR(20),
       avatar_url VARCHAR(500),
-      role ENUM('super_admin', 'admin', 'manager', 'receptionist', 'employee', 'staff', 'customer') DEFAULT 'staff',
+      role VARCHAR(50) DEFAULT 'staff',
       permissions JSON,
       is_active TINYINT(1) DEFAULT 1,
       is_owner TINYINT(1) DEFAULT 0,
@@ -1034,6 +1034,11 @@ async function runMultiTenantMigrations() {
     }
   }
 
+  // Migrate staff.role from ENUM to VARCHAR for flexible roles
+  try {
+    await pool.execute("ALTER TABLE staff MODIFY COLUMN role VARCHAR(50) DEFAULT 'staff'");
+  } catch (e) { /* already VARCHAR or other issue */ }
+
   console.log('Multi-tenant migrations completed');
 }
 
@@ -1062,14 +1067,16 @@ async function createDefaultTenantAndAdmin() {
     );
     tenantId = tenantResult.insertId;
     console.log('Default tenant created: Trasealla');
-    
+  } else {
+    tenantId = tenantExists[0].id;
+  }
+  
+  if (tenantExists.length === 0) {
     // Create subscription for default tenant
     await execute(
       `INSERT INTO subscriptions (tenant_id, plan, status, max_users, features) VALUES (?, ?, ?, ?, ?)`,
       [tenantId, 'enterprise', 'active', 999, JSON.stringify({ all: true })]
     );
-  } else {
-    tenantId = tenantExists[0].id;
   }
   
   // Create Trasealla Super Admin (Platform Owner)
@@ -1129,12 +1136,12 @@ async function createDefaultTenantAndAdmin() {
   // Create or update Trasealla tenant admin
   const [adminExists] = await pool.execute("SELECT id, tenant_id FROM staff WHERE username = 'admin'");
   if (adminExists.length === 0) {
-    const hashedPassword = await bcrypt.default.hash('Trasealla123', 10);
+    const hashedPassword = await bcrypt.default.hash('admin123', 10);
     await execute(
-      `INSERT INTO staff (tenant_id, username, email, password, full_name, role, permissions, is_owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO staff (tenant_id, username, email, password, full_name, role, permissions, is_owner, password_set) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [tenantId, 'admin', 'admin@trasealla.com', hashedPassword, 'Tenant Administrator', 'admin', JSON.stringify({ all: true }), 1]
     );
-    console.log('Tenant admin created: admin / Trasealla123');
+    console.log('Tenant admin created: admin / admin123');
   } else if (adminExists[0].tenant_id === null) {
     // Update existing admin to belong to the default tenant
     await execute(
@@ -1156,6 +1163,25 @@ async function createDefaultTenantAndAdmin() {
   } else if (demoExists[0].tenant_id === null) {
     await execute(`UPDATE staff SET tenant_id = ? WHERE username = 'demo'`, [tenantId]);
     console.log('Updated demo user with tenant_id');
+  }
+
+  // Create demo users for each predefined role
+  const demoRoleUsers = [
+    { username: 'manager_demo', email: 'manager@beauty.com', password: 'Manager123', full_name: 'Sarah Manager', role: 'manager', job_title: 'Salon Manager' },
+    { username: 'reception_demo', email: 'reception@beauty.com', password: 'Reception123', full_name: 'Lina Receptionist', role: 'receptionist', job_title: 'Front Desk' },
+    { username: 'stylist_demo', email: 'stylist@beauty.com', password: 'Stylist123', full_name: 'Nora Stylist', role: 'stylist', job_title: 'Senior Hair Stylist' },
+  ];
+
+  for (const u of demoRoleUsers) {
+    const [exists] = await pool.execute("SELECT id FROM staff WHERE username = ?", [u.username]);
+    if (exists.length === 0) {
+      const hp = await bcrypt.default.hash(u.password, 10);
+      await execute(
+        `INSERT INTO staff (tenant_id, username, email, password, full_name, role, job_title, is_active, password_set) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)`,
+        [tenantId, u.username, u.email, hp, u.full_name, u.role, u.job_title]
+      );
+      console.log(`Demo ${u.role} created: ${u.username} / ${u.password}`);
+    }
   }
   
   // Create default pipeline for the tenant if none exists

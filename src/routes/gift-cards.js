@@ -21,6 +21,8 @@ async function ensureTables() {
       purchased_by INT,
       message TEXT,
       template VARCHAR(50) DEFAULT 'classic',
+      card_color VARCHAR(20) DEFAULT '#f2421b',
+      card_icon VARCHAR(50) DEFAULT 'Gift',
       status ENUM('active','redeemed','expired','void') DEFAULT 'active',
       expires_at DATE,
       notes TEXT,
@@ -32,6 +34,14 @@ async function ensureTables() {
       UNIQUE KEY uq_code (tenant_id, code)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+
+  // Add card_color and card_icon columns if missing (migration)
+  try {
+    await execute("ALTER TABLE gift_cards ADD COLUMN card_color VARCHAR(20) DEFAULT '#f2421b' AFTER template");
+  } catch (e) { /* column exists */ }
+  try {
+    await execute("ALTER TABLE gift_cards ADD COLUMN card_icon VARCHAR(50) DEFAULT 'Gift' AFTER card_color");
+  } catch (e) { /* column exists */ }
 
   await execute(`
     CREATE TABLE IF NOT EXISTS gift_card_transactions (
@@ -129,7 +139,7 @@ router.post('/', async (req, res) => {
   try {
     await ensureTables();
     const t = req.tenantId;
-    const { initial_value, currency = 'AED', issued_to_name, issued_to_email, issued_to_phone, message, template = 'classic', validity_months = 12, notes } = req.body;
+    const { initial_value, currency = 'AED', issued_to_name, issued_to_email, issued_to_phone, message, template = 'classic', card_color = '#f2421b', card_icon = 'Gift', validity_months = 12, notes } = req.body;
 
     if (!initial_value || initial_value <= 0) return res.status(400).json({ success: false, message: 'Valid amount required' });
 
@@ -150,9 +160,9 @@ router.post('/', async (req, res) => {
     const result = await execute(`
       INSERT INTO gift_cards (tenant_id, code, initial_value, remaining_value, currency,
         issued_to_name, issued_to_email, issued_to_phone, message, template,
-        issued_by, status, expires_at, notes)
-      VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?)
-    `, [t, code, initial_value, initial_value, currency, issued_to_name || null, issued_to_email || null, issued_to_phone || null, message || null, template, req.user?.id || null, 'active', expiresStr, notes || null]);
+        card_color, card_icon, issued_by, status, expires_at, notes)
+      VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)
+    `, [t, code, initial_value, initial_value, currency, issued_to_name || null, issued_to_email || null, issued_to_phone || null, message || null, template, card_color, card_icon, req.user?.id || null, 'active', expiresStr, notes || null]);
 
     // Record purchase transaction
     await execute(`
@@ -235,5 +245,58 @@ router.post('/:id/void', async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
+/**
+ * Shared helper — validates & redeems a gift card by code.
+ * Can be called from appointments / invoices / POS routes.
+ *
+ * @param {number}  tenantId
+ * @param {string}  code          Gift card code
+ * @param {number}  amount        Amount to redeem
+ * @param {object}  opts
+ * @param {number}  [opts.invoice_id]
+ * @param {number}  [opts.created_by]
+ * @returns {{ success, remaining_value, status, message }}
+ */
+export async function redeemGiftCard(tenantId, code, amount, opts = {}) {
+  if (!code || !amount || amount <= 0) {
+    return { success: false, message: 'Gift card code and valid amount are required' };
+  }
+
+  const [card] = await query(
+    "SELECT * FROM gift_cards WHERE code = ? AND tenant_id = ? AND status = 'active'",
+    [code, tenantId]
+  );
+  if (!card) return { success: false, message: 'Gift card not found or not active' };
+
+  // Check expiry
+  if (card.expires_at && new Date(card.expires_at) < new Date()) {
+    await execute("UPDATE gift_cards SET status = 'expired' WHERE id = ?", [card.id]);
+    return { success: false, message: 'Gift card has expired' };
+  }
+
+  const remaining = parseFloat(card.remaining_value);
+  if (amount > remaining) {
+    return { success: false, message: `Insufficient gift card balance. Available: ${remaining.toFixed(2)}` };
+  }
+
+  const newBalance = remaining - amount;
+  const newStatus = newBalance <= 0 ? 'redeemed' : 'active';
+
+  await execute('UPDATE gift_cards SET remaining_value = ?, status = ? WHERE id = ?', [newBalance, newStatus, card.id]);
+
+  await execute(`
+    INSERT INTO gift_card_transactions (gift_card_id, tenant_id, type, amount, balance_after, invoice_id, created_by)
+    VALUES (?, ?, 'redeem', ?, ?, ?, ?)
+  `, [card.id, tenantId, amount, newBalance, opts.invoice_id || null, opts.created_by || null]);
+
+  return {
+    success: true,
+    gift_card_id: card.id,
+    remaining_value: newBalance,
+    status: newStatus,
+    message: `Gift card redeemed: ${amount.toFixed(2)} deducted. Remaining balance: ${newBalance.toFixed(2)}`
+  };
+}
 
 export default router;

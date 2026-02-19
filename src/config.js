@@ -22,12 +22,16 @@ export const config = {
   // CORS
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
   
-  // Email
+  // Email (supports both EMAIL_* and SMTP_* env vars)
   smtp: {
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    user: process.env.SMTP_USER || '',
-    pass: process.env.SMTP_PASS || '',
+    host: process.env.EMAIL_HOST || process.env.SMTP_HOST || 'smtp.office365.com',
+    port: parseInt(process.env.EMAIL_PORT || process.env.SMTP_PORT || '587'),
+    user: process.env.EMAIL_USER || process.env.SMTP_USER || '',
+    pass: process.env.EMAIL_PASS || process.env.SMTP_PASS || '',
+    from: process.env.EMAIL_FROM || process.env.SMTP_USER || process.env.EMAIL_USER || '',
+    fromName: process.env.EMAIL_NAME || 'Trasealla Solutions',
+    secure: (process.env.EMAIL_SECURE || 'false') === 'true',
+    tls: (process.env.EMAIL_TLS || 'true') === 'true',
   },
   
   // OpenAI (for AI Chatbot)

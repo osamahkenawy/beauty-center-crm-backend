@@ -222,6 +222,31 @@ router.get('/session', authMiddleware, async (req, res) => {
 });
 
 /**
+ * Get current user profile (alias for /session)
+ */
+router.get('/me', authMiddleware, async (req, res) => {
+  try {
+    const [user] = await query(
+      `SELECT s.id, s.tenant_id, s.username, s.email, s.full_name, s.role, 
+              s.permissions, s.is_owner, s.avatar_url,
+              t.name as tenant_name, t.slug as tenant_slug, t.status as tenant_status,
+              t.logo_url as tenant_logo
+       FROM staff s
+       LEFT JOIN tenants t ON s.tenant_id = t.id
+       WHERE s.id = ?`,
+      [req.user.id]
+    );
+    if (!user) return res.status(401).json({ success: false, message: 'User not found' });
+    let permissions = {};
+    try { permissions = typeof user.permissions === 'string' ? JSON.parse(user.permissions) : (user.permissions || {}); } catch (e) {}
+    res.json({ success: true, user: { ...user, permissions } });
+  } catch (error) {
+    console.error('Profile error:', error);
+    res.status(500).json({ success: false, message: 'Failed to get profile' });
+  }
+});
+
+/**
  * Change password
  */
 router.post('/change-password', authMiddleware, async (req, res) => {
