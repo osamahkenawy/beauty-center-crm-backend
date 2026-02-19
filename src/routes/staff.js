@@ -5,6 +5,7 @@ import { query, execute } from '../lib/database.js';
 import { authMiddleware, adminOnly, canAccess } from '../middleware/auth.js';
 import { config } from '../config.js';
 import { sendInviteEmail as sendInvite } from '../lib/email.js';
+import { notifyStaff } from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -494,6 +495,9 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
       console.log(`   Link: ${inviteUrl}`);
       console.log(`   Email Sent: ${emailSent ? '✅' : '❌ ' + (emailError || 'No SMTP configured')}\n`);
     }
+
+    // Push notification
+    notifyStaff(req.tenantId, `New Team Member — ${full_name}`, `${role || 'Staff'} · ${email}`, { staff_id: result.insertId, email }).catch(() => {});
 
     res.json({
       success: true,

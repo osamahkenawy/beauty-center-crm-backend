@@ -2,6 +2,7 @@ import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { redeemGiftCard } from './gift-cards.js';
+import { notifyAppointment, notifyAppointmentCancelled } from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -174,6 +175,14 @@ router.post('/', async (req, res) => {
        WHERE a.id = ?`,
       [result.insertId]
     );
+
+    // Push notification
+    notifyAppointment(
+      tenantId,
+      `New Booking — ${appointment?.customer_first_name || 'Client'} ${appointment?.customer_last_name || ''}`.trim(),
+      `${appointment?.service_name || 'Service'} with ${appointment?.staff_name || 'Staff'} on ${new Date(start_time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
+      { appointment_id: result.insertId, customer_id, service_id, staff_id }
+    ).catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -563,6 +572,14 @@ router.post('/:id/checkout', async (req, res) => {
 
     // 9. Return result
     const [invoice] = await query('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
+
+    // Push notification
+    notifyAppointment(
+      tenantId,
+      pay_now ? `Checkout Complete — ${invoiceNumber}` : `Invoice Created — ${invoiceNumber}`,
+      `Total: ${(invoice?.total || 0)} ${payment_method ? `via ${payment_method}` : ''}`.trim(),
+      { appointment_id: parseInt(id), invoice_id: invoiceId }
+    ).catch(() => {});
 
     res.json({
       success: true,

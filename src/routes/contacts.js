@@ -1,6 +1,7 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { notifyClient } from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -325,6 +326,9 @@ router.post('/', authMiddleware, async (req, res) => {
       'INSERT INTO audit_logs (tenant_id, user_id, action, entity_type, entity_id, new_values) VALUES (?, ?, ?, ?, ?, ?)',
       [tid, req.user.id, 'create', 'contact', result.insertId, JSON.stringify({ first_name, last_name, email })]
     );
+
+    // Push notification
+    notifyClient(tid, `New Client — ${first_name} ${last_name || ''}`.trim(), email || phone || 'Added via dashboard', { client_id: result.insertId }).catch(() => {});
 
     res.json({ success: true, message: 'Client created successfully', data: { id: result.insertId } });
   } catch (error) {

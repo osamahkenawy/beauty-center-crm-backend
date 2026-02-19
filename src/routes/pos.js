@@ -2,6 +2,7 @@ import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { redeemGiftCard } from './gift-cards.js';
+import { notifyPOS } from '../lib/notify.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -159,6 +160,9 @@ router.post('/checkout', async (req, res) => {
         return res.status(400).json({ success: false, message: giftCardResult.message });
       }
     }
+
+    // Push notification
+    notifyPOS(req.tenantId, `POS Sale — ${txnNumber}`, `Total: ${total.toFixed(2)} via ${payment_method}`, { pos_id: result.insertId, total: parseFloat(total.toFixed(2)), payment_method }).catch(() => {});
 
     res.status(201).json({
       success: true,

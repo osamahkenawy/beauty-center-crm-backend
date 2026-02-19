@@ -3,6 +3,7 @@ import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { processAutoEarn, redeemLoyaltyForPayment } from './loyalty.js';
 import { redeemGiftCard } from './gift-cards.js';
+import { notifyInvoice, notifyPayment } from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -253,6 +254,9 @@ router.post('/', async (req, res) => {
       `, [invoiceId, item.item_type || 'service', item.item_id || null, itemName, itemDesc, item.quantity || 1, item.unit_price || 0, item.discount || 0, itemTotal]);
     }
 
+    // Push notification
+    notifyInvoice(req.tenantId, `Invoice ${invoiceNumber} Created`, `Total: ${total.toFixed(2)} ${currency}`, { invoice_id: invoiceId, total }).catch(() => {});
+
     res.status(201).json({ success: true, data: {
       id: invoiceId, invoice_number: invoiceNumber,
       subtotal, discount_amount: discountVal, discount_type, discount_value: discount_amount,
@@ -379,11 +383,11 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-// ── Record payment (supports split: loyalty points + other method) ──
+// ── Record payment (supports split: discount code + loyalty points + other method) ──
 router.post('/:id/pay', async (req, res) => {
   try {
-    const { amount, payment_method = 'cash', gift_card_code, loyalty_amount } = req.body;
-    const totalAmount = parseFloat(amount || 0);
+    const { amount, payment_method = 'cash', gift_card_code, loyalty_amount, discount_code } = req.body;
+    let totalAmount = parseFloat(amount || 0);
     const loyaltyAmt = parseFloat(loyalty_amount || 0);
 
     if (totalAmount <= 0) return res.status(400).json({ success: false, message: 'Valid amount required' });
@@ -395,6 +399,76 @@ router.post('/:id/pay', async (req, res) => {
 
     const [inv] = await query('SELECT * FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+    if (inv.status === 'paid') return res.status(400).json({ success: false, message: 'Invoice is already fully paid' });
+    if (inv.status === 'void') return res.status(400).json({ success: false, message: 'Cannot pay a voided invoice' });
+
+    // Cap payment at balance due
+    const currentBalance = Math.max(0, parseFloat(inv.total) - parseFloat(inv.amount_paid || 0));
+    if (currentBalance <= 0) return res.status(400).json({ success: false, message: 'No balance due on this invoice' });
+    totalAmount = Math.min(totalAmount, currentBalance);
+
+    // ── Step 0: Validate & apply discount code (reduces effective amount) ──
+    let discountResult = null;
+    if (discount_code) {
+      // Validate the code
+      const [dc] = await query(`
+        SELECT dc.id as code_id, dc.code, dc.max_uses, dc.used_count as code_used, dc.is_active as code_active,
+               p.id as promo_id, p.name as promo_name, p.type, p.discount_value, p.min_spend,
+               p.is_active as promo_active, p.start_date, p.end_date, p.usage_limit, p.used_count as promo_used
+        FROM discount_codes dc
+        LEFT JOIN promotions p ON dc.promotion_id = p.id
+        WHERE dc.code = ? AND dc.tenant_id = ? AND dc.is_active = 1
+      `, [discount_code, req.tenantId]);
+
+      if (!dc) return res.status(400).json({ success: false, message: 'Invalid discount code' });
+      if (!dc.promo_active) return res.status(400).json({ success: false, message: 'Promotion is not active' });
+
+      const now = new Date();
+      if (dc.start_date && new Date(dc.start_date) > now) return res.status(400).json({ success: false, message: 'Promotion has not started yet' });
+      if (dc.end_date && new Date(dc.end_date) < now) return res.status(400).json({ success: false, message: 'Promotion has expired' });
+      if (dc.max_uses > 0 && dc.code_used >= dc.max_uses) return res.status(400).json({ success: false, message: 'Discount code usage limit reached' });
+      if (dc.min_spend > 0 && parseFloat(inv.total) < dc.min_spend) return res.status(400).json({ success: false, message: `Minimum spend of ${dc.min_spend} required` });
+
+      // Calculate discount
+      let discAmt = 0;
+      const balance = parseFloat(inv.total) - parseFloat(inv.amount_paid || 0);
+      if (dc.type === 'percentage') {
+        discAmt = Math.min(balance, balance * (dc.discount_value / 100));
+      } else {
+        discAmt = Math.min(balance, parseFloat(dc.discount_value));
+      }
+      discAmt = parseFloat(discAmt.toFixed(2));
+
+      if (discAmt > 0) {
+        // Record usage
+        await execute(`INSERT INTO discount_usage (discount_code_id, promotion_id, customer_id, invoice_id, discount_amount) VALUES (?,?,?,?,?)`,
+          [dc.code_id, dc.promo_id, inv.customer_id || null, parseInt(req.params.id), discAmt]);
+        await execute('UPDATE discount_codes SET used_count = used_count + 1 WHERE id = ?', [dc.code_id]);
+        await execute('UPDATE promotions SET used_count = used_count + 1 WHERE id = ?', [dc.promo_id]);
+
+        // Adjust invoice discount
+        await execute(`UPDATE invoices SET discount_amount = discount_amount + ? WHERE id = ? AND tenant_id = ?`,
+          [discAmt, req.params.id, req.tenantId]);
+
+        // Recalculate total after discount
+        const [updated] = await query('SELECT total, amount_paid FROM invoices WHERE id = ?', [req.params.id]);
+        const newTotal = parseFloat(updated.total) - discAmt;
+        await execute('UPDATE invoices SET total = ? WHERE id = ? AND tenant_id = ?', [newTotal, req.params.id, req.tenantId]);
+
+        // Adjust payment amount to the new balance
+        const newBalance = newTotal - parseFloat(updated.amount_paid || 0);
+        totalAmount = Math.min(totalAmount, newBalance);
+
+        discountResult = {
+          code: dc.code,
+          promo_name: dc.promo_name,
+          type: dc.type,
+          discount_value: dc.discount_value,
+          discount_amount: discAmt,
+          message: `${dc.promo_name}: ${dc.type === 'percentage' ? dc.discount_value + '%' : dc.discount_value} off (−${discAmt})`
+        };
+      }
+    }
 
     // ── Step 1: Process loyalty points deduction (if any) ──
     let loyaltyRedeemResult = null;
@@ -427,8 +501,14 @@ router.post('/:id/pay', async (req, res) => {
     }
 
     // ── Step 3: Update invoice ──
-    const newPaid = parseFloat(inv.amount_paid || 0) + totalAmount;
-    const newStatus = newPaid >= parseFloat(inv.total) ? 'paid' : 'partially_paid';
+    // Re-read invoice if discount was applied (total may have changed)
+    let currentInv = inv;
+    if (discountResult) {
+      const [refreshed] = await query('SELECT * FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
+      if (refreshed) currentInv = refreshed;
+    }
+    const newPaid = parseFloat(currentInv.amount_paid || 0) + totalAmount;
+    const newStatus = newPaid >= parseFloat(currentInv.total) ? 'paid' : 'partially_paid';
     const recordedMethod = loyaltyAmt > 0 && loyaltyAmt < totalAmount
       ? `loyalty_points+${payment_method}`
       : loyaltyAmt >= totalAmount ? 'loyalty_points' : payment_method;
@@ -446,16 +526,25 @@ router.post('/:id/pay', async (req, res) => {
 
     // Build response message
     const parts = [];
+    if (discountResult) parts.push(discountResult.message);
     if (loyaltyAmt > 0 && remainingAfterLoyalty > 0) {
-      parts.push(`Split payment: ${loyaltyAmt} via points + ${remainingAfterLoyalty} via ${payment_method}`);
+      parts.push(`Split: ${loyaltyAmt} pts + ${remainingAfterLoyalty} ${payment_method}`);
     } else if (loyaltyAmt >= totalAmount) {
-      parts.push(`Payment of ${totalAmount} via loyalty points`);
-    } else {
-      parts.push(`Payment of ${totalAmount} via ${payment_method}`);
+      parts.push(`Paid ${totalAmount} via loyalty points`);
+    } else if (totalAmount > 0) {
+      parts.push(`Paid ${totalAmount} via ${payment_method}`);
     }
     if (loyaltyRedeemResult) parts.push(loyaltyRedeemResult.message);
     if (giftCardResult) parts.push(`Gift card: ${giftCardResult.message}`);
     if (loyaltyResult) parts.push(`+${loyaltyResult.points_earned} loyalty points earned`);
+
+    // Push notification for payment
+    notifyPayment(
+      req.tenantId,
+      newStatus === 'paid' ? `Invoice ${inv.invoice_number} Fully Paid` : `Payment Received — ${inv.invoice_number}`,
+      `${totalAmount.toFixed(2)} via ${payment_method}`,
+      { invoice_id: inv.id, amount: totalAmount, method: payment_method }
+    ).catch(() => {});
 
     res.json({ 
       success: true, 
@@ -463,7 +552,8 @@ router.post('/:id/pay', async (req, res) => {
       message: parts.join(' · '),
       loyalty: loyaltyResult,
       loyalty_redeem: loyaltyRedeemResult,
-      gift_card: giftCardResult
+      gift_card: giftCardResult,
+      discount: discountResult
     });
   } catch (error) {
     console.error('Record payment error:', error);

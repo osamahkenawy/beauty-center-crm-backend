@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { notifyGiftCard } from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -170,6 +171,9 @@ router.post('/', async (req, res) => {
       VALUES (?, ?, 'purchase', ?, ?, ?)
     `, [result.insertId, t, initial_value, initial_value, req.user?.id || null]);
 
+    // Push notification
+    notifyGiftCard(t, `Gift Card Sold — ${code}`, `Value: ${initial_value}${issued_to_name ? ` for ${issued_to_name}` : ''}`, { gift_card_id: result.insertId, code, amount: initial_value }).catch(() => {});
+
     res.status(201).json({ success: true, data: { id: result.insertId, code, initial_value, expires_at: expiresStr }, message: 'Gift card created' });
   } catch (error) {
     console.error('Create gift card error:', error);
@@ -289,6 +293,9 @@ export async function redeemGiftCard(tenantId, code, amount, opts = {}) {
     INSERT INTO gift_card_transactions (gift_card_id, tenant_id, type, amount, balance_after, invoice_id, created_by)
     VALUES (?, ?, 'redeem', ?, ?, ?, ?)
   `, [card.id, tenantId, amount, newBalance, opts.invoice_id || null, opts.created_by || null]);
+
+  // Push notification
+  notifyGiftCard(tenantId, `Gift Card Redeemed — ${code}`, `${amount.toFixed(2)} deducted. Balance: ${newBalance.toFixed(2)}`, { gift_card_id: card.id, code, amount, remaining: newBalance }).catch(() => {});
 
   return {
     success: true,

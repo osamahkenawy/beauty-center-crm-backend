@@ -12,8 +12,8 @@ async function ensureTables() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       tenant_id INT NOT NULL,
       user_id INT DEFAULT NULL,
-      type ENUM('appointment','invoice','payment','reminder','system','promotion','review','inventory','loyalty','general') DEFAULT 'general',
-      category ENUM('info','success','warning','error','reminder') DEFAULT 'info',
+      type VARCHAR(50) DEFAULT 'general',
+      category VARCHAR(30) DEFAULT 'info',
       title VARCHAR(255) NOT NULL,
       message TEXT,
       data JSON,
@@ -30,6 +30,18 @@ async function ensureTables() {
       INDEX idx_created (created_at)
     )
   `);
+
+  // Migrate ENUM → VARCHAR if table was created with old schema
+  try {
+    const [col] = await execute(`SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'notifications' AND COLUMN_NAME = 'type'`);
+    if (col && col.COLUMN_TYPE && col.COLUMN_TYPE.startsWith('enum')) {
+      await execute(`ALTER TABLE notifications MODIFY COLUMN type VARCHAR(50) DEFAULT 'general'`);
+    }
+    const [col2] = await execute(`SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'notifications' AND COLUMN_NAME = 'category'`);
+    if (col2 && col2.COLUMN_TYPE && col2.COLUMN_TYPE.startsWith('enum')) {
+      await execute(`ALTER TABLE notifications MODIFY COLUMN category VARCHAR(30) DEFAULT 'info'`);
+    }
+  } catch (_) {}
 
   await execute(`
     CREATE TABLE IF NOT EXISTS reminder_settings (

@@ -1,6 +1,7 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { notifyLoyalty } from '../lib/notify.js';
 
 const router = express.Router();
 
@@ -254,6 +255,9 @@ router.post('/', async (req, res) => {
         [tenantId, customer_id, welcomeBonus]
       );
     }
+
+    // Push notification
+    notifyLoyalty(tenantId, 'New Loyalty Member Enrolled', `${welcomeBonus > 0 ? `+${welcomeBonus} welcome bonus points` : 'Tier: ' + (tier || 'bronze')}`, { member_id: result.insertId, customer_id }).catch(() => {});
 
     res.json({ 
       success: true, 
@@ -544,6 +548,11 @@ router.post('/:id/transaction', async (req, res) => {
     else message = `${effectivePoints} points expired`;
     
     if (tierChanged) message += ` 🎉 Tier upgraded to ${newTier}!`;
+
+    // Push notification for tier upgrade or significant point events
+    if (tierChanged) {
+      notifyLoyalty(req.tenantId, `Tier Upgrade — ${newTier.charAt(0).toUpperCase() + newTier.slice(1)}`, message, { member_id: id, new_tier: newTier }).catch(() => {});
+    }
 
     res.json({ 
       success: true, 
