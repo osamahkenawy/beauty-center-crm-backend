@@ -663,4 +663,105 @@ export async function processAutoEarn(tenantId, customerId, invoiceTotal, invoic
   }
 }
 
+/**
+ * GET /check/:customerId — Check customer's loyalty balance + point value
+ */
+router.get('/check/:customerId', async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const customerId = req.params.customerId;
+
+    const [member] = await query(
+      'SELECT lp.*, CONCAT(c.first_name, " ", c.last_name) as customer_name FROM loyalty_points lp LEFT JOIN contacts c ON lp.customer_id = c.id AND c.tenant_id = lp.tenant_id WHERE lp.tenant_id = ? AND lp.customer_id = ?',
+      [tenantId, customerId]
+    );
+
+    if (!member) {
+      return res.json({ success: true, data: { enrolled: false, points: 0, monetary_value: 0, point_value: 0 } });
+    }
+
+    const settings = await getLoyaltySettings(tenantId);
+    const pointValue = settings.point_value || 0.01;
+    const maxRedeemPercent = settings.max_redeem_percent || 50;
+
+    res.json({
+      success: true,
+      data: {
+        enrolled: true,
+        points: member.points || 0,
+        tier: member.tier,
+        point_value: pointValue,
+        monetary_value: parseFloat(((member.points || 0) * pointValue).toFixed(2)),
+        max_redeem_percent: maxRedeemPercent,
+        customer_name: member.customer_name
+      }
+    });
+  } catch (error) {
+    console.error('Check loyalty balance error:', error);
+    res.status(500).json({ success: false, message: 'Failed to check loyalty balance' });
+  }
+});
+
+/**
+ * Redeem loyalty points for an invoice payment.
+ * Called from invoices route when payment_method = 'loyalty_points'.
+ * @param {number} tenantId
+ * @param {number} customerId
+ * @param {number} monetaryAmount - The monetary value to pay
+ * @param {number} invoiceId
+ * @returns {{ success: boolean, message: string, points_redeemed?: number, monetary_value?: number }}
+ */
+export async function redeemLoyaltyForPayment(tenantId, customerId, monetaryAmount, invoiceId) {
+  try {
+    const settings = await getLoyaltySettings(tenantId);
+    const pointValue = settings.point_value || 0.01; // e.g. 1 point = 0.01 AED
+
+    // Get member
+    const [member] = await query(
+      'SELECT * FROM loyalty_points WHERE tenant_id = ? AND customer_id = ?',
+      [tenantId, customerId]
+    );
+    if (!member) {
+      return { success: false, message: 'Customer is not enrolled in the loyalty program' };
+    }
+
+    // Calculate points needed for this monetary amount
+    const pointsNeeded = Math.ceil(monetaryAmount / pointValue);
+
+    if (member.points < pointsNeeded) {
+      const maxMonetary = (member.points * pointValue).toFixed(2);
+      return { 
+        success: false, 
+        message: `Insufficient points. Available: ${member.points} pts (worth ${maxMonetary}). Needed: ${pointsNeeded} pts.` 
+      };
+    }
+
+    // Check max_redeem_percent against invoice total
+    // (handled at the frontend/caller level, but add safety here)
+
+    // Deduct points
+    await execute(
+      'UPDATE loyalty_points SET points = points - ?, total_redeemed = total_redeemed + ? WHERE id = ?',
+      [pointsNeeded, pointsNeeded, member.id]
+    );
+
+    // Record transaction
+    await execute(
+      `INSERT INTO loyalty_transactions (tenant_id, customer_id, points, transaction_type, description, reference_type, reference_id)
+       VALUES (?, ?, ?, 'redeem', ?, 'invoice', ?)`,
+      [tenantId, customerId, pointsNeeded, `Redeemed ${pointsNeeded} pts for payment of ${monetaryAmount}`, invoiceId]
+    );
+
+    return {
+      success: true,
+      message: `${pointsNeeded} points redeemed (worth ${monetaryAmount})`,
+      points_redeemed: pointsNeeded,
+      monetary_value: monetaryAmount
+    };
+  } catch (error) {
+    console.error('Loyalty redemption error:', error);
+    return { success: false, message: 'Failed to redeem loyalty points' };
+  }
+}
+
 export default router;

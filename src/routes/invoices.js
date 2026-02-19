@@ -1,7 +1,7 @@
 import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { processAutoEarn } from './loyalty.js';
+import { processAutoEarn, redeemLoyaltyForPayment } from './loyalty.js';
 import { redeemGiftCard } from './gift-cards.js';
 
 const router = express.Router();
@@ -379,11 +379,14 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-// ── Record payment ──
+// ── Record payment (supports split: loyalty points + other method) ──
 router.post('/:id/pay', async (req, res) => {
   try {
-    const { amount, payment_method = 'cash', gift_card_code } = req.body;
-    if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Valid amount required' });
+    const { amount, payment_method = 'cash', gift_card_code, loyalty_amount } = req.body;
+    const totalAmount = parseFloat(amount || 0);
+    const loyaltyAmt = parseFloat(loyalty_amount || 0);
+
+    if (totalAmount <= 0) return res.status(400).json({ success: false, message: 'Valid amount required' });
 
     // Require gift card code when paying by gift card
     if (payment_method === 'gift_card' && !gift_card_code) {
@@ -393,10 +396,28 @@ router.post('/:id/pay', async (req, res) => {
     const [inv] = await query('SELECT * FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
     if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
 
-    // If gift card, validate and redeem BEFORE recording payment
+    // ── Step 1: Process loyalty points deduction (if any) ──
+    let loyaltyRedeemResult = null;
+    if (loyaltyAmt > 0) {
+      if (!inv.customer_id) {
+        return res.status(400).json({ success: false, message: 'Invoice must have a customer to redeem loyalty points' });
+      }
+      if (loyaltyAmt > totalAmount) {
+        return res.status(400).json({ success: false, message: 'Loyalty amount cannot exceed total payment amount' });
+      }
+      loyaltyRedeemResult = await redeemLoyaltyForPayment(
+        req.tenantId, inv.customer_id, loyaltyAmt, parseInt(req.params.id)
+      );
+      if (!loyaltyRedeemResult.success) {
+        return res.status(400).json({ success: false, message: loyaltyRedeemResult.message });
+      }
+    }
+
+    // ── Step 2: Process gift card (for the non-loyalty portion) ──
     let giftCardResult = null;
-    if (payment_method === 'gift_card' && gift_card_code) {
-      giftCardResult = await redeemGiftCard(req.tenantId, gift_card_code, parseFloat(amount), {
+    const remainingAfterLoyalty = totalAmount - loyaltyAmt;
+    if (payment_method === 'gift_card' && gift_card_code && remainingAfterLoyalty > 0) {
+      giftCardResult = await redeemGiftCard(req.tenantId, gift_card_code, remainingAfterLoyalty, {
         invoice_id: parseInt(req.params.id),
         created_by: req.user?.id
       });
@@ -405,30 +426,48 @@ router.post('/:id/pay', async (req, res) => {
       }
     }
 
-    const newPaid = parseFloat(inv.amount_paid || 0) + parseFloat(amount);
+    // ── Step 3: Update invoice ──
+    const newPaid = parseFloat(inv.amount_paid || 0) + totalAmount;
     const newStatus = newPaid >= parseFloat(inv.total) ? 'paid' : 'partially_paid';
+    const recordedMethod = loyaltyAmt > 0 && loyaltyAmt < totalAmount
+      ? `loyalty_points+${payment_method}`
+      : loyaltyAmt >= totalAmount ? 'loyalty_points' : payment_method;
 
     await execute(`
       UPDATE invoices SET amount_paid = ?, status = ?, payment_method = ?, paid_at = IF(? = 'paid', NOW(), paid_at)
       WHERE id = ? AND tenant_id = ?
-    `, [newPaid, newStatus, payment_method, newStatus, req.params.id, req.tenantId]);
+    `, [newPaid, newStatus, recordedMethod, newStatus, req.params.id, req.tenantId]);
 
-    // Auto-earn loyalty points when fully paid
+    // ── Step 4: Auto-earn loyalty when fully paid (skip if any part used points) ──
     let loyaltyResult = null;
-    if (newStatus === 'paid' && inv.customer_id && inv.total > 0) {
+    if (newStatus === 'paid' && inv.customer_id && inv.total > 0 && loyaltyAmt <= 0) {
       loyaltyResult = await processAutoEarn(req.tenantId, inv.customer_id, parseFloat(inv.total), parseInt(req.params.id));
     }
+
+    // Build response message
+    const parts = [];
+    if (loyaltyAmt > 0 && remainingAfterLoyalty > 0) {
+      parts.push(`Split payment: ${loyaltyAmt} via points + ${remainingAfterLoyalty} via ${payment_method}`);
+    } else if (loyaltyAmt >= totalAmount) {
+      parts.push(`Payment of ${totalAmount} via loyalty points`);
+    } else {
+      parts.push(`Payment of ${totalAmount} via ${payment_method}`);
+    }
+    if (loyaltyRedeemResult) parts.push(loyaltyRedeemResult.message);
+    if (giftCardResult) parts.push(`Gift card: ${giftCardResult.message}`);
+    if (loyaltyResult) parts.push(`+${loyaltyResult.points_earned} loyalty points earned`);
 
     res.json({ 
       success: true, 
       data: { amount_paid: newPaid, status: newStatus }, 
-      message: `Payment of ${amount} recorded${giftCardResult ? ` (Gift card: ${giftCardResult.message})` : ''}${loyaltyResult ? ` (+${loyaltyResult.points_earned} loyalty points)` : ''}`,
+      message: parts.join(' · '),
       loyalty: loyaltyResult,
+      loyalty_redeem: loyaltyRedeemResult,
       gift_card: giftCardResult
     });
   } catch (error) {
     console.error('Record payment error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 });
 

@@ -78,12 +78,19 @@ router.get('/', authMiddleware, async (req, res) => {
     sql += ' ORDER BY b.is_headquarters DESC, b.name';
     const branches = await query(sql, params);
 
-    // Parse working_hours JSON
-    branches.forEach(b => {
+    // Parse working_hours JSON and add staff counts
+    for (const b of branches) {
       if (b.working_hours && typeof b.working_hours === 'string') {
         try { b.working_hours = JSON.parse(b.working_hours); } catch (e) {}
       }
-    });
+      
+      // Get staff count for this branch
+      const [staffCount] = await query(
+        'SELECT COUNT(*) as count FROM staff WHERE branch_id = ? AND tenant_id = ?',
+        [b.id, tenantId]
+      ).catch(() => [{ count: 0 }]);
+      b.staff_count = staffCount?.count || 0;
+    }
 
     res.json({ success: true, data: branches });
   } catch (error) {
