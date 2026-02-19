@@ -1,7 +1,10 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { generateToken, authMiddleware } from '../middleware/auth.js';
+import { sendEmail } from '../lib/email.js';
+import { config } from '../config.js';
 
 const router = express.Router();
 
@@ -283,5 +286,340 @@ router.post('/change-password', authMiddleware, async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to change password' });
   }
 });
+
+// ─── Password Reset Token Table ──────────────────────────────
+async function ensureResetTable() {
+  await execute(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      staff_id   INT NOT NULL,
+      token      VARCHAR(128) NOT NULL UNIQUE,
+      expires_at DATETIME NOT NULL,
+      used       TINYINT(1) DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_token (token),
+      INDEX idx_staff (staff_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+}
+
+/**
+ * POST /auth/forgot-password
+ * Accepts email, sends a reset link. Always responds with success to prevent enumeration.
+ */
+router.post('/forgot-password', async (req, res) => {
+  try {
+    await ensureResetTable();
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required.' });
+
+    // Find user
+    const [user] = await query(
+      'SELECT id, full_name, email, is_active FROM staff WHERE email = ? LIMIT 1',
+      [email.toLowerCase().trim()]
+    );
+
+    // Always return success (prevent email enumeration)
+    if (!user || !user.is_active) {
+      return res.json({ success: true, message: 'If that email exists, a reset link has been sent.' });
+    }
+
+    // Invalidate any existing tokens for this user
+    await execute(
+      'UPDATE password_reset_tokens SET used = 1 WHERE staff_id = ? AND used = 0',
+      [user.id]
+    );
+
+    // Generate secure token (32 bytes = 64 hex chars)
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await execute(
+      'INSERT INTO password_reset_tokens (staff_id, token, expires_at) VALUES (?, ?, ?)',
+      [user.id, token, expiresAt]
+    );
+
+    const resetUrl = `${config.frontendUrl}/reset-password?token=${token}`;
+    const firstName = user.full_name?.split(' ')[0] || 'there';
+
+    const html = `
+      <div style="max-width:520px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;">
+        <div style="background:linear-gradient(135deg,#1c2430 0%,#2d3f55 100%);padding:36px;text-align:center;border-radius:16px 16px 0 0;">
+          <img src="https://trasealla.com/logo.png" alt="Trasealla" style="height:38px;margin-bottom:16px;" onerror="this.style.display='none'"/>
+          <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">Reset Your Password</h1>
+          <p style="color:rgba(255,255,255,0.6);margin:8px 0 0;font-size:14px;">You requested a password reset</p>
+        </div>
+        <div style="background:#fff;padding:36px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 16px 16px;">
+          <p style="color:#374151;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi <strong>${firstName}</strong>,</p>
+          <p style="color:#6b7280;font-size:14px;line-height:1.7;margin:0 0 28px;">
+            We received a request to reset your password for your Trasealla CRM account.
+            Click the button below to choose a new password.
+          </p>
+          <div style="text-align:center;margin:0 0 28px;">
+            <a href="${resetUrl}"
+               style="display:inline-block;background:linear-gradient(135deg,#f2421b,#e63715);
+                      color:#fff;padding:14px 36px;border-radius:10px;text-decoration:none;
+                      font-weight:700;font-size:15px;letter-spacing:0.02em;
+                      box-shadow:0 4px 14px rgba(242,66,27,0.35);">
+              Reset Password
+            </a>
+          </div>
+          <div style="background:#f8fafc;border-radius:10px;padding:14px 18px;margin:0 0 24px;">
+            <p style="color:#94a3b8;font-size:12px;margin:0 0 6px;">Or copy this link:</p>
+            <p style="color:#475569;font-size:12px;word-break:break-all;margin:0;font-family:monospace;">${resetUrl}</p>
+          </div>
+          <p style="color:#9ca3af;font-size:12px;line-height:1.6;margin:0 0 8px;">
+            ⏱ This link expires in <strong>1 hour</strong>.
+          </p>
+          <p style="color:#9ca3af;font-size:12px;margin:0;">
+            If you didn't request this, you can safely ignore this email.
+            Your password will not change.
+          </p>
+          <hr style="border:none;border-top:1px solid #f1f5f9;margin:24px 0;" />
+          <p style="color:#cbd5e1;font-size:11px;text-align:center;margin:0;">
+            Trasealla CRM · <a href="https://trasealla.com" style="color:#f2421b;text-decoration:none;">trasealla.com</a>
+          </p>
+        </div>
+      </div>
+    `;
+
+    const emailResult = await sendEmail({
+      to: user.email,
+      subject: 'Reset your Trasealla CRM password',
+      html,
+    });
+
+    if (!emailResult.success) {
+      console.error('Reset email failed:', emailResult.error);
+      // In dev mode — log the link
+      console.log(`\n🔑 PASSWORD RESET LINK (dev):\n   ${resetUrl}\n`);
+    }
+
+    res.json({ success: true, message: 'If that email exists, a reset link has been sent.' });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ success: false, message: 'Something went wrong. Please try again.' });
+  }
+});
+
+/**
+ * GET /auth/reset-password/validate
+ * Validates a reset token without consuming it
+ */
+router.get('/reset-password/validate', async (req, res) => {
+  try {
+    await ensureResetTable();
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ success: false, message: 'Token is required.' });
+
+    const [row] = await query(
+      `SELECT prt.*, s.email, s.full_name
+       FROM password_reset_tokens prt
+       JOIN staff s ON s.id = prt.staff_id
+       WHERE prt.token = ? AND prt.used = 0 AND prt.expires_at > NOW()`,
+      [token]
+    );
+
+    if (!row) {
+      return res.status(400).json({
+        success: false,
+        message: 'This reset link has expired or already been used. Please request a new one.',
+      });
+    }
+
+    res.json({
+      success: true,
+      email: row.email,
+      name: row.full_name,
+    });
+  } catch (error) {
+    console.error('Validate token error:', error);
+    res.status(500).json({ success: false, message: 'Validation failed.' });
+  }
+});
+
+/**
+ * POST /auth/reset-password
+ * Accepts token + new password, updates the password
+ */
+router.post('/reset-password', async (req, res) => {
+  try {
+    await ensureResetTable();
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ success: false, message: 'Token and new password are required.' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+    }
+
+    // Find valid, unexpired token
+    const [row] = await query(
+      `SELECT prt.id, prt.staff_id, s.email, s.full_name
+       FROM password_reset_tokens prt
+       JOIN staff s ON s.id = prt.staff_id
+       WHERE prt.token = ? AND prt.used = 0 AND prt.expires_at > NOW()`,
+      [token]
+    );
+
+    if (!row) {
+      return res.status(400).json({
+        success: false,
+        message: 'This reset link has expired or already been used. Please request a new one.',
+      });
+    }
+
+    // Hash new password
+    const hashed = await bcrypt.hash(password, 10);
+
+    // Update password + mark token as used (atomic)
+    await execute('UPDATE staff SET password = ? WHERE id = ?', [hashed, row.staff_id]);
+    await execute('UPDATE password_reset_tokens SET used = 1 WHERE id = ?', [row.id]);
+
+    // Log action
+    try {
+      await execute(
+        'INSERT INTO audit_logs (tenant_id, user_id, action, entity_type, entity_id, ip_address) VALUES (?, ?, ?, ?, ?, ?)',
+        [null, row.staff_id, 'password_reset', 'staff', row.staff_id, req.ip]
+      );
+    } catch (e) { /* ignore audit log failures */ }
+
+    // Send confirmation email
+    const confirmHtml = `
+      <div style="max-width:480px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;">
+        <div style="background:linear-gradient(135deg,#10b981,#059669);padding:32px;text-align:center;border-radius:16px 16px 0 0;">
+          <div style="width:52px;height:52px;background:rgba(255,255,255,0.2);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 14px;">
+            <span style="font-size:24px;">✓</span>
+          </div>
+          <h1 style="color:#fff;margin:0;font-size:20px;font-weight:700;">Password Updated!</h1>
+        </div>
+        <div style="background:#fff;padding:30px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 16px 16px;">
+          <p style="color:#374151;font-size:14px;line-height:1.7;">
+            Hi <strong>${row.full_name?.split(' ')[0] || 'there'}</strong>, your Trasealla CRM password has been changed successfully.
+          </p>
+          <p style="color:#6b7280;font-size:13px;line-height:1.7;">
+            If you didn't make this change, contact support immediately at
+            <a href="mailto:support@trasealla.com" style="color:#f2421b;">support@trasealla.com</a>
+          </p>
+          <div style="text-align:center;margin:24px 0;">
+            <a href="${config.frontendUrl}/login"
+               style="display:inline-block;background:#1c2430;color:#fff;padding:12px 28px;
+                      border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;">
+              Sign In Now
+            </a>
+          </div>
+          <hr style="border:none;border-top:1px solid #f1f5f9;margin:20px 0;" />
+          <p style="color:#cbd5e1;font-size:11px;text-align:center;margin:0;">Trasealla CRM</p>
+        </div>
+      </div>
+    `;
+    sendEmail({ to: row.email, subject: 'Your password has been changed', html: confirmHtml })
+      .catch(() => {}); // fire-and-forget
+
+    res.json({ success: true, message: 'Password reset successfully. You can now sign in.' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reset password. Please try again.' });
+  }
+});
+
+/**
+ * POST /auth/test-email
+ * Admin-only: sends a test email and returns SMTP diagnostic info
+ */
+router.post('/test-email', authMiddleware, async (req, res) => {
+  try {
+    const { to } = req.body;
+    if (!to) return res.status(400).json({ success: false, message: 'Recipient "to" email is required' });
+
+    const smtpConfigured = !!(config.smtp.user && config.smtp.pass);
+    const configInfo = {
+      host: config.smtp.host,
+      port: config.smtp.port,
+      user: config.smtp.user || '(not set)',
+      from: config.smtp.from || config.smtp.user || '(not set)',
+      secure: config.smtp.secure,
+      tls: config.smtp.tls,
+      configured: smtpConfigured,
+    };
+
+    if (!smtpConfigured) {
+      return res.json({
+        success: false,
+        message: 'Email not configured — EMAIL_USER or EMAIL_PASS missing in .env',
+        config: configInfo,
+      });
+    }
+
+    const result = await sendEmail({
+      to,
+      subject: '✅ Trasealla CRM — Email Test',
+      html: `
+        <div style="max-width:480px;margin:0 auto;font-family:Arial,sans-serif;">
+          <div style="background:#1c2430;padding:24px;border-radius:12px 12px 0 0;text-align:center;">
+            <h2 style="color:#fff;margin:0;">Email Test Successful 🎉</h2>
+          </div>
+          <div style="background:#fff;padding:24px;border:1px solid #eee;border-radius:0 0 12px 12px;">
+            <p>This is a test email from <strong>Trasealla CRM</strong>.</p>
+            <p>If you received this, your SMTP configuration is working correctly.</p>
+            <hr style="border:none;border-top:1px solid #f0f0f0;margin:16px 0;"/>
+            <p style="color:#aaa;font-size:12px;text-align:center;">
+              Sent from: ${config.smtp.from || config.smtp.user}<br/>
+              Via: ${config.smtp.host}:${config.smtp.port}
+            </p>
+          </div>
+        </div>
+      `,
+    });
+
+    res.json({
+      success: result.success,
+      message: result.success
+        ? `✅ Test email sent to ${to} successfully`
+        : `❌ Failed: ${result.error}`,
+      messageId: result.messageId,
+      config: configInfo,
+      diagnosis: result.success ? null : getDiagnosis(result.error),
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * GET /auth/email-status
+ * Returns current SMTP configuration status (no credentials exposed)
+ */
+router.get('/email-status', authMiddleware, async (req, res) => {
+  const smtpConfigured = !!(config.smtp.user && config.smtp.pass);
+  res.json({
+    success: true,
+    data: {
+      configured: smtpConfigured,
+      host: config.smtp.host,
+      port: config.smtp.port,
+      from: config.smtp.from || config.smtp.user || null,
+      user: config.smtp.user ? config.smtp.user : null,
+    },
+  });
+});
+
+function getDiagnosis(error = '') {
+  if (error.includes('535') || error.includes('EAUTH') || error.includes('Authentication')) {
+    return {
+      cause: 'Authentication failed — Office 365 rejected the credentials',
+      fixes: [
+        'Enable "Authenticated SMTP" in Microsoft 365 Admin: admin.microsoft.com → Users → noreply@trasealla.com → Mail → Manage email apps → Enable "Authenticated SMTP"',
+        'If MFA is enabled: create an App Password at account.microsoft.com → Security → App passwords, then update EMAIL_PASS in .env',
+        'Run PowerShell: Set-CASMailbox -Identity noreply@trasealla.com -SmtpClientAuthenticationDisabled $false',
+      ],
+    };
+  }
+  if (error.includes('ECONNREFUSED') || error.includes('ETIMEDOUT')) {
+    return { cause: 'Cannot reach SMTP server — network/firewall issue' };
+  }
+  return { cause: error };
+}
 
 export default router;

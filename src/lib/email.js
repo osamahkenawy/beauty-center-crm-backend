@@ -46,12 +46,25 @@ function getTransporter() {
     .then(() => console.log('✅ Email transporter verified — ready to send'))
     .catch((err) => {
       console.error('❌ Email transporter verification failed:', err.message);
-      if (err.message.includes('535') || err.message.includes('Authentication')) {
-        console.error('   💡 FIX: Enable "Authenticated SMTP" in Microsoft 365 Admin Center:');
-        console.error('      1. Go to admin.microsoft.com → Users → Active users');
-        console.error('      2. Select the noreply@trasealla.com user');
-        console.error('      3. Mail tab → Manage email apps → Enable "Authenticated SMTP"');
-        console.error('      4. If MFA is on, create an App Password instead');
+      if (err.code === 'EAUTH' || err.message.includes('535') || err.message.includes('Authentication')) {
+        console.error('\n═══════════════════════════════════════════════════════════');
+        console.error('  EMAIL AUTH FAILED — noreply@trasealla.com cannot log in');
+        console.error('═══════════════════════════════════════════════════════════');
+        console.error('  Most likely cause: SMTP AUTH is disabled in Microsoft 365');
+        console.error('\n  To fix — Microsoft 365 Admin Center steps:');
+        console.error('  1. Go to https://admin.microsoft.com');
+        console.error('  2. Users → Active users → noreply@trasealla.com');
+        console.error('  3. Click "Mail" tab → "Manage email apps"');
+        console.error('  4. Enable "Authenticated SMTP" checkbox → Save');
+        console.error('\n  OR if MFA/Modern Auth is enabled:');
+        console.error('  1. Sign in as noreply@trasealla.com at account.microsoft.com');
+        console.error('  2. Security → Advanced security options → App passwords');
+        console.error('  3. Create an App Password → put it in EMAIL_PASS in .env');
+        console.error('\n  OR enable via PowerShell (fastest):');
+        console.error('  Set-CASMailbox -Identity noreply@trasealla.com -SmtpClientAuthenticationDisabled $false');
+        console.error('═══════════════════════════════════════════════════════════\n');
+      } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+        console.error('  💡 Network issue — cannot reach smtp.office365.com:587');
       }
     });
 

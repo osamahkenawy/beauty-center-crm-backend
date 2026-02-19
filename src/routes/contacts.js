@@ -134,6 +134,7 @@ router.get('/', authMiddleware, async (req, res) => {
         COALESCE(inv.total_spent, 0) as total_spent,
         COALESCE(inv.invoice_count, 0) as invoice_count,
         appt.last_visit,
+        COALESCE(appt.total_visits, 0) as total_visits,
         appt.total_appointments,
         appt.upcoming_appointment
       FROM contacts c
@@ -147,6 +148,7 @@ router.get('/', authMiddleware, async (req, res) => {
       LEFT JOIN (
         SELECT customer_id, tenant_id,
           MAX(CASE WHEN status = 'completed' THEN DATE(start_time) END) as last_visit,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END) as total_visits,
           COUNT(*) as total_appointments,
           MIN(CASE WHEN DATE(start_time) >= CURDATE() AND status IN ('confirmed','scheduled') THEN DATE(start_time) END) as upcoming_appointment
         FROM appointments GROUP BY customer_id, tenant_id
