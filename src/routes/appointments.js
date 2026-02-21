@@ -819,7 +819,7 @@ router.get('/staff/:staff_id/availability', async (req, res) => {
       [tenantId, staff_id, dayOfWeek]
     );
 
-    // Default working hours if no schedule found (8 AM - 6 PM)
+    // Default working hours if no schedule found — try branch working hours first
     let startHour = 8;
     let startMin = 0;
     let endHour = 18;
@@ -846,6 +846,63 @@ router.get('/staff/:staff_id/availability', async (req, res) => {
       if (schedule.break_end) {
         const [breakEH, breakEM] = schedule.break_end.split(':').map(Number);
         breakEnd = { hour: breakEH, minute: breakEM };
+      }
+    } else {
+      // No staff-specific schedule — fall back to branch working hours
+      try {
+        const DAY_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+        const dayName = DAY_NAMES[dayOfWeek];
+
+        // Get staff's branch_id
+        const [staffRow] = await query(
+          `SELECT branch_id FROM staff WHERE id = ? AND tenant_id = ? LIMIT 1`,
+          [staff_id, tenantId]
+        );
+
+        if (staffRow && staffRow.branch_id) {
+          const [branchRow] = await query(
+            `SELECT working_hours FROM branches WHERE id = ? AND tenant_id = ? LIMIT 1`,
+            [staffRow.branch_id, tenantId]
+          );
+          if (branchRow && branchRow.working_hours) {
+            let wh = branchRow.working_hours;
+            if (typeof wh === 'string') wh = JSON.parse(wh);
+            const dayConfig = wh[dayName];
+            if (dayConfig && dayConfig.isOpen) {
+              const [oH, oM] = dayConfig.open.split(':').map(Number);
+              const [cH, cM] = dayConfig.close.split(':').map(Number);
+              startHour = oH; startMin = oM;
+              endHour   = cH; endMin   = cM;
+            } else if (dayConfig && !dayConfig.isOpen) {
+              // Branch is closed this day — return no slots
+              return res.json({
+                success: true,
+                data: { date, slots: [], workingHours: null, isDayOff: false, isBranchClosed: true }
+              });
+            }
+          }
+        } else {
+          // No branch_id on staff — try HQ branch of this tenant
+          const [hqBranch] = await query(
+            `SELECT working_hours FROM branches WHERE tenant_id = ? AND is_headquarters = 1 LIMIT 1`,
+            [tenantId]
+          );
+          if (hqBranch && hqBranch.working_hours) {
+            let wh = hqBranch.working_hours;
+            if (typeof wh === 'string') wh = JSON.parse(wh);
+            const DAY_NAMES2 = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+            const dayConfig = wh[DAY_NAMES2[dayOfWeek]];
+            if (dayConfig && dayConfig.isOpen) {
+              const [oH, oM] = dayConfig.open.split(':').map(Number);
+              const [cH, cM] = dayConfig.close.split(':').map(Number);
+              startHour = oH; startMin = oM;
+              endHour   = cH; endMin   = cM;
+            }
+          }
+        }
+      } catch (fallbackErr) {
+        console.error('Branch hours fallback error:', fallbackErr);
+        // Keep defaults 8-18
       }
     }
 
@@ -901,17 +958,18 @@ router.get('/staff/:staff_id/availability', async (req, res) => {
       });
     }
 
+    const pad2 = n => String(n).padStart(2, '0');
     res.json({ 
       success: true, 
       data: { 
         date, 
         slots,
-        workingHours: schedule ? {
-          start: schedule.start_time,
-          end: schedule.end_time,
-          break_start: schedule.break_start,
-          break_end: schedule.break_end
-        } : null
+        workingHours: {
+          start: `${pad2(startHour)}:${pad2(startMin)}:00`,
+          end:   `${pad2(endHour)}:${pad2(endMin)}:00`,
+          break_start: schedule?.break_start || null,
+          break_end:   schedule?.break_end   || null,
+        }
       } 
     });
   } catch (error) {

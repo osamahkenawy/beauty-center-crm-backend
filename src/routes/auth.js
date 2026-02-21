@@ -586,6 +586,44 @@ router.get('/email-status', authMiddleware, async (req, res) => {
   });
 });
 
+/**
+ * Update own profile (full_name, phone, avatar_url)
+ */
+router.put('/profile', authMiddleware, async (req, res) => {
+  try {
+    const { full_name, phone, avatar_url } = req.body;
+    const updates = [];
+    const params = [];
+
+    if (full_name !== undefined) { updates.push('full_name = ?'); params.push(full_name.trim()); }
+    if (phone     !== undefined) { updates.push('phone = ?');     params.push(phone.trim() || null); }
+    if (avatar_url !== undefined) { updates.push('avatar_url = ?'); params.push(avatar_url.trim() || null); }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, message: 'No fields to update' });
+    }
+
+    params.push(req.user.id);
+    await execute(`UPDATE staff SET ${updates.join(', ')}, updated_at = NOW() WHERE id = ?`, params);
+
+    const [updated] = await query(
+      `SELECT s.id, s.tenant_id, s.username, s.email, s.full_name, s.phone, s.role,
+              s.permissions, s.is_owner, s.avatar_url,
+              t.name as tenant_name, t.slug as tenant_slug, t.logo_url as tenant_logo
+       FROM staff s LEFT JOIN tenants t ON s.tenant_id = t.id
+       WHERE s.id = ?`,
+      [req.user.id]
+    );
+    let permissions = {};
+    try { permissions = typeof updated.permissions === 'string' ? JSON.parse(updated.permissions) : (updated.permissions || {}); } catch (e) {}
+
+    res.json({ success: true, message: 'Profile updated successfully', user: { ...updated, permissions } });
+  } catch (error) {
+    console.error('Profile update error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update profile' });
+  }
+});
+
 function getDiagnosis(error = '') {
   if (error.includes('535') || error.includes('EAUTH') || error.includes('Authentication')) {
     return {
