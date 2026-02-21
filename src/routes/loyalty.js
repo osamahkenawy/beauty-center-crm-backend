@@ -2,6 +2,7 @@ import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { notifyLoyalty } from '../lib/notify.js';
+import { sendNotificationEmail } from '../lib/email.js';
 
 const router = express.Router();
 
@@ -258,6 +259,39 @@ router.post('/', async (req, res) => {
 
     // Push notification
     notifyLoyalty(tenantId, 'New Loyalty Member Enrolled', `${welcomeBonus > 0 ? `+${welcomeBonus} welcome bonus points` : 'Tier: ' + (tier || 'bronze')}`, { member_id: result.insertId, customer_id }).catch(() => {});
+
+    // Send welcome email
+    try {
+      const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [customer_id]);
+      if (customer && customer.email) {
+        const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Member';
+        const tierName = (tier || 'bronze').charAt(0).toUpperCase() + (tier || 'bronze').slice(1);
+        const tierInfo = loyaltySettings.tiers?.[tier || 'bronze'] || {};
+        
+        await sendNotificationEmail({
+          to: customer.email,
+          subject: `🎉 Welcome to Our Loyalty Program!`,
+          title: `Welcome to Our Loyalty Program! 🎉`,
+          body: `
+            <p>Dear ${customerName},</p>
+            <p>Congratulations! You've been enrolled in our loyalty program.</p>
+            ${welcomeBonus > 0 ? `<p><strong>🎁 Welcome Bonus:</strong> You've received ${welcomeBonus} bonus points to get you started!</p>` : ''}
+            <p><strong>Your Tier:</strong> ${tierName}${tierInfo.perks ? ` — ${tierInfo.perks}` : ''}</p>
+            <p><strong>Current Points:</strong> ${startPoints}</p>
+            <p>Start earning points with every purchase and unlock exclusive rewards!</p>
+            <ul>
+              <li>Earn points on every purchase</li>
+              <li>Redeem points for discounts</li>
+              <li>Unlock higher tiers for better rewards</li>
+            </ul>
+            <p>Thank you for being a valued member!</p>
+          `,
+          tenantId,
+        }).catch(err => console.error('Failed to send loyalty welcome email:', err.message));
+      }
+    } catch (emailErr) {
+      console.error('Error sending loyalty welcome email:', emailErr);
+    }
 
     res.json({ 
       success: true, 
@@ -661,11 +695,70 @@ export async function processAutoEarn(tenantId, customerId, invoiceTotal, invoic
     else if (updatedMember.total_earned >= tiers.gold.min) newTier = 'gold';
     else if (updatedMember.total_earned >= tiers.silver.min) newTier = 'silver';
     
-    if (newTier !== updatedMember.tier) {
+    const tierUpgraded = newTier !== updatedMember.tier;
+    if (tierUpgraded) {
       await execute('UPDATE loyalty_points SET tier = ? WHERE id = ?', [newTier, memberId]);
+      
+      // Send tier upgrade email
+      try {
+        const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [customerId]);
+        if (customer && customer.email) {
+          const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Member';
+          const tierName = newTier.charAt(0).toUpperCase() + newTier.slice(1);
+          const tierInfo = tiers[newTier] || {};
+          
+          await sendNotificationEmail({
+            to: customer.email,
+            subject: `🎉 Tier Upgrade! You're Now ${tierName}!`,
+            title: `Congratulations! You've Upgraded to ${tierName} Tier! 🎉`,
+            body: `
+              <p>Dear ${customerName},</p>
+              <p>Congratulations! You've been upgraded to <strong>${tierName} Tier</strong>!</p>
+              <p><strong>Your New Benefits:</strong></p>
+              <ul>
+                <li>${tierInfo.perks || 'Exclusive perks and rewards'}</li>
+                <li>${tierInfo.multiplier || 1}x points multiplier on all purchases</li>
+                <li>Priority booking and special offers</li>
+              </ul>
+              <p>Keep earning points to unlock even more rewards!</p>
+              <p>Thank you for your continued loyalty!</p>
+            `,
+            tenantId,
+          }).catch(err => console.error('Failed to send tier upgrade email:', err.message));
+        }
+      } catch (emailErr) {
+        console.error('Error sending tier upgrade email:', emailErr);
+      }
     }
     
-    return { points_earned: totalPoints, new_tier: newTier !== updatedMember.tier ? newTier : null };
+    // Send points earned email (if significant amount)
+    if (totalPoints >= 100) {
+      try {
+        const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [customerId]);
+        if (customer && customer.email) {
+          const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Member';
+          const [currentPoints] = await query('SELECT points FROM loyalty_points WHERE id = ?', [memberId]);
+          
+          await sendNotificationEmail({
+            to: customer.email,
+            subject: `🎁 You Earned ${totalPoints} Loyalty Points!`,
+            title: `You've Earned ${totalPoints} Points! 🎁`,
+            body: `
+              <p>Dear ${customerName},</p>
+              <p>Great news! You've earned <strong>${totalPoints} loyalty points</strong> from your recent purchase!</p>
+              <p><strong>Your Current Balance:</strong> ${currentPoints?.points || 0} points</p>
+              <p>You can redeem these points for discounts on your next visit. Keep earning to unlock higher tiers and exclusive rewards!</p>
+              <p>Thank you for your loyalty!</p>
+            `,
+            tenantId,
+          }).catch(err => console.error('Failed to send points earned email:', err.message));
+        }
+      } catch (emailErr) {
+        console.error('Error sending points earned email:', emailErr);
+      }
+    }
+    
+    return { points_earned: totalPoints, new_tier: tierUpgraded ? newTier : null };
   } catch (error) {
     console.error('Auto-earn loyalty points error:', error);
     return null;

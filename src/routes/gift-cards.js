@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { notifyGiftCard } from '../lib/notify.js';
+import { sendNotificationEmail } from '../lib/email.js';
 
 const router = express.Router();
 
@@ -173,6 +174,33 @@ router.post('/', async (req, res) => {
 
     // Push notification
     notifyGiftCard(t, `Gift Card Sold — ${code}`, `Value: ${initial_value}${issued_to_name ? ` for ${issued_to_name}` : ''}`, { gift_card_id: result.insertId, code, amount: initial_value }).catch(() => {});
+
+    // Send email if recipient email provided
+    if (issued_to_email) {
+      try {
+        await sendNotificationEmail({
+          to: issued_to_email,
+          subject: `🎁 Gift Card from ${currency} ${initial_value.toFixed(2)}`,
+          title: `You've Received a Gift Card! 🎁`,
+          body: `
+            <p>Dear ${issued_to_name || 'Valued Customer'},</p>
+            <p>You've received a gift card!</p>
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
+              <h2 style="color: ${card_color}; margin: 0 0 10px 0;">${currency} ${initial_value.toFixed(2)}</h2>
+              <p style="margin: 10px 0;"><strong>Gift Card Code:</strong></p>
+              <p style="font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #333; margin: 10px 0;">${code}</p>
+              ${expiresStr ? `<p style="margin: 10px 0; color: #666;">Valid until: ${new Date(expiresStr).toLocaleDateString()}</p>` : ''}
+            </div>
+            ${message ? `<p style="font-style: italic; color: #666;">"${message}"</p>` : ''}
+            <p>You can use this gift card at checkout. Simply enter the code when making a payment.</p>
+            <p>Thank you and enjoy!</p>
+          `,
+          tenantId: t,
+        }).catch(err => console.error('Failed to send gift card email:', err.message));
+      } catch (emailErr) {
+        console.error('Error sending gift card email:', emailErr);
+      }
+    }
 
     res.status(201).json({ success: true, data: { id: result.insertId, code, initial_value, expires_at: expiresStr }, message: 'Gift card created' });
   } catch (error) {

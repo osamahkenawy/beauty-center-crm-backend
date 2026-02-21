@@ -15,13 +15,13 @@ const DEFAULT_ROLES = [
     sort_order: 1,
     permissions: {
       dashboard: { view: true },
-      appointments: { view: true, create: true, edit: true, delete: true, confirm: true, cancel: true },
+      appointments: { view: true, create: true, edit: true, delete: true, confirm: true, cancel: true, view_scope: 'all' },
       clients: { view: true, create: true, edit: true, delete: true, export: true },
       team: { view: true, create: true, edit: true, delete: true, manage_roles: true },
       services: { view: true, create: true, edit: true, delete: true },
       categories: { view: true, create: true, edit: true, delete: true },
       payments: { view: true, create: true, edit: true, refund: true },
-      invoices: { view: true, create: true, edit: true, print: true },
+      invoices: { view: true, create: true, edit: true, print: true, view_scope: 'all' },
       reports: { view: true, export: true },
       settings: { view: true, edit: true },
       branches: { view: true, create: true, edit: true, delete: true },
@@ -53,13 +53,13 @@ const DEFAULT_ROLES = [
     sort_order: 2,
     permissions: {
       dashboard: { view: true },
-      appointments: { view: true, create: true, edit: true, confirm: true, cancel: true },
+      appointments: { view: true, create: true, edit: true, confirm: true, cancel: true, view_scope: 'all' },
       clients: { view: true, create: true, edit: true, export: true },
       team: { view: true, create: true, edit: true },
       services: { view: true, create: true, edit: true },
       categories: { view: true, create: true, edit: true },
       payments: { view: true, create: true, edit: true, refund: true },
-      invoices: { view: true, create: true, edit: true, print: true },
+      invoices: { view: true, create: true, edit: true, print: true, view_scope: 'all' },
       reports: { view: true, export: true },
       settings: { view: true },
       branches: { view: true },
@@ -90,13 +90,13 @@ const DEFAULT_ROLES = [
     sort_order: 3,
     permissions: {
       dashboard: { view: true },
-      appointments: { view: true, create: true, edit: true, confirm: true, cancel: true },
+      appointments: { view: true, create: true, edit: true, confirm: true, cancel: true, view_scope: 'all' },
       clients: { view: true, create: true, edit: true },
       team: { view: true },
       services: { view: true },
       categories: { view: true },
       payments: { view: true, create: true },
-      invoices: { view: true, create: true, print: true },
+      invoices: { view: true, create: true, print: true, view_scope: 'all' },
       reports: { view: true },
       inventory: { view: true },
       gift_cards: { view: true },
@@ -120,7 +120,7 @@ const DEFAULT_ROLES = [
     sort_order: 4,
     permissions: {
       dashboard: { view: true },
-      appointments: { view: true, edit: true }, // own appointments only
+      appointments: { view: true, edit: true, view_scope: 'own' }, // own appointments only
       clients: { view: true },
       team: {},
       services: { view: true },
@@ -143,7 +143,7 @@ const DEFAULT_ROLES = [
     sort_order: 5,
     permissions: {
       dashboard: { view: true },
-      appointments: { view: true }, // own only
+      appointments: { view: true, view_scope: 'own' }, // own only
       clients: { view: true },
       services: { view: true },
       categories: { view: true },
@@ -187,6 +187,35 @@ async function seedDefaultRoles(tenantId) {
         [tenantId, role.name, role.display_name, role.description, role.color,
           JSON.stringify(role.permissions), role.is_system ? 1 : 0, role.sort_order]
       );
+    } else {
+      // Update existing role to include view_scope if missing
+      const [existingRole] = await query(
+        'SELECT permissions FROM roles WHERE tenant_id = ? AND name = ?',
+        [tenantId, role.name]
+      );
+      if (existingRole) {
+        let existingPerms = typeof existingRole.permissions === 'string' 
+          ? JSON.parse(existingRole.permissions) 
+          : (existingRole.permissions || {});
+        
+        // Merge with default permissions, preserving existing but adding missing view_scope
+        let updated = false;
+        if (existingPerms.appointments && !existingPerms.appointments.view_scope) {
+          existingPerms.appointments.view_scope = role.permissions.appointments?.view_scope || 'own';
+          updated = true;
+        }
+        if (existingPerms.invoices && !existingPerms.invoices.view_scope) {
+          existingPerms.invoices.view_scope = role.permissions.invoices?.view_scope || 'own';
+          updated = true;
+        }
+        
+        if (updated) {
+          await execute(
+            'UPDATE roles SET permissions = ? WHERE tenant_id = ? AND name = ?',
+            [JSON.stringify(existingPerms), tenantId, role.name]
+          );
+        }
+      }
     }
   }
 }
@@ -199,11 +228,8 @@ router.get('/', authMiddleware, async (req, res) => {
     await ensureTables();
     const tenantId = req.tenantId;
 
-    // Auto-seed if no roles exist
-    const countCheck = await query('SELECT COUNT(*) as cnt FROM roles WHERE tenant_id = ?', [tenantId]);
-    if (countCheck[0].cnt === 0) {
-      await seedDefaultRoles(tenantId);
-    }
+    // Auto-seed if no roles exist, or update existing roles with view_scope
+    await seedDefaultRoles(tenantId);
 
     const roles = await query(
       `SELECT r.*, 

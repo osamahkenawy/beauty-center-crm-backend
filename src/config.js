@@ -38,6 +38,22 @@ export const config = {
   openai: {
     apiKey: process.env.OPENAI_API_KEY || '',
     model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+  },
+  
+  // SMS (Twilio)
+  sms: {
+    provider: process.env.SMS_PROVIDER || 'twilio', // 'twilio' or 'local'
+    twilio: {
+      accountSid: process.env.TWILIO_ACCOUNT_SID || '',
+      authToken: process.env.TWILIO_AUTH_TOKEN || '',
+      fromNumber: process.env.TWILIO_FROM_NUMBER || '',
+    },
+    // Local provider (for UAE, Saudi, etc.)
+    local: {
+      apiUrl: process.env.SMS_API_URL || '',
+      apiKey: process.env.SMS_API_KEY || '',
+      fromNumber: process.env.SMS_FROM_NUMBER || '',
+    }
   }
 };
 

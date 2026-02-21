@@ -47,6 +47,104 @@ async function sendInviteEmail(member, token, tenantId, tenantName) {
 }
 
 // ═══════════════════════════════════════════════════════
+// ─── PUBLIC ROUTES (no auth) - Must be before /:id ─────
+// ═══════════════════════════════════════════════════════
+
+// ─── Validate invite token (public) ───────────────────
+router.get('/set-password/validate', async (req, res) => {
+  try {
+    await ensureSchema();
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Token is required' });
+    }
+
+    const [staff] = await query(
+      'SELECT id, full_name, email, invite_token_expires, password_set FROM staff WHERE invite_token = ?',
+      [token]
+    );
+
+    if (!staff) {
+      return res.status(400).json({ success: false, message: 'Invalid invite link' });
+    }
+
+    if (staff.password_set) {
+      return res.status(400).json({ success: false, message: 'Password has already been set for this account' });
+    }
+
+    // Check expiration (handle timezone issues by comparing as strings)
+    if (staff.invite_token_expires) {
+      const expiresDate = new Date(staff.invite_token_expires);
+      const now = new Date();
+      // Add 1 minute buffer to account for clock differences
+      if (expiresDate.getTime() < (now.getTime() - 60000)) {
+        return res.status(400).json({ success: false, message: 'Invite link has expired. Please ask your admin to resend.' });
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      name: staff.full_name,
+      email: staff.email
+    });
+  } catch (error) {
+    console.error('Validate invite token error:', error);
+    res.status(500).json({ success: false, message: 'Failed to validate invite link' });
+  }
+});
+
+// ─── Set password via invite token (public) ────────────
+router.post('/set-password', async (req, res) => {
+  try {
+    await ensureSchema();
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ success: false, message: 'Token and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+
+    const [staff] = await query(
+      'SELECT id, full_name, invite_token_expires FROM staff WHERE invite_token = ?',
+      [token]
+    );
+
+    if (!staff) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired invite link' });
+    }
+
+    // Check expiration (handle timezone issues by comparing as strings)
+    if (staff.invite_token_expires) {
+      const expiresDate = new Date(staff.invite_token_expires);
+      const now = new Date();
+      // Add 1 minute buffer to account for clock differences
+      if (expiresDate.getTime() < (now.getTime() - 60000)) {
+        return res.status(400).json({ success: false, message: 'Invite link has expired. Please ask your admin to resend.' });
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await execute(
+      'UPDATE staff SET password = ?, password_set = 1, invite_token = NULL, invite_token_expires = NULL WHERE id = ?',
+      [hashedPassword, staff.id]
+    );
+
+    res.json({ success: true, message: 'Password set successfully! You can now log in.' });
+  } catch (error) {
+    console.error('Set password error:', error);
+    res.status(500).json({ success: false, message: 'Failed to set password' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// ─── AUTHENTICATED ROUTES ──────────────────────────────
+// ═══════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════
 // ─── Test email sending (admin only) ──────────────────
 // ═══════════════════════════════════════════════════════
 router.post('/test-email', authMiddleware, adminOnly, async (req, res) => {
@@ -525,48 +623,6 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-// ─── Set password via invite token (public) ────────────
-// ═══════════════════════════════════════════════════════
-router.post('/set-password', async (req, res) => {
-  try {
-    await ensureSchema();
-    const { token, password } = req.body;
-
-    if (!token || !password) {
-      return res.status(400).json({ success: false, message: 'Token and password are required' });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
-
-    const [staff] = await query(
-      'SELECT id, full_name, invite_token_expires FROM staff WHERE invite_token = ?',
-      [token]
-    );
-
-    if (!staff) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired invite link' });
-    }
-
-    if (staff.invite_token_expires && new Date(staff.invite_token_expires) < new Date()) {
-      return res.status(400).json({ success: false, message: 'Invite link has expired. Please ask your admin to resend.' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    await execute(
-      'UPDATE staff SET password = ?, password_set = 1, invite_token = NULL, invite_token_expires = NULL WHERE id = ?',
-      [hashedPassword, staff.id]
-    );
-
-    res.json({ success: true, message: 'Password set successfully! You can now log in.' });
-  } catch (error) {
-    console.error('Set password error:', error);
-    res.status(500).json({ success: false, message: 'Failed to set password' });
-  }
-});
-
-// ═══════════════════════════════════════════════════════
 // ─── Resend invite email ──────────────────────────────
 // ═══════════════════════════════════════════════════════
 router.post('/:id/resend-invite', authMiddleware, adminOnly, async (req, res) => {
@@ -697,17 +753,218 @@ router.patch('/:id', authMiddleware, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// ─── Get upcoming appointments for staff ───────────────
+// ═══════════════════════════════════════════════════════
+router.get('/:id/appointments', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenantId;
+    const now = new Date();
+
+    const appointments = await query(
+      `SELECT a.id, a.start_time, a.end_time, a.status, a.customer_id,
+              c.first_name as customer_first_name, c.last_name as customer_last_name,
+              p.name as service_name
+       FROM appointments a
+       LEFT JOIN contacts c ON a.customer_id = c.id
+       LEFT JOIN products p ON a.service_id = p.id
+       WHERE a.tenant_id = ? AND a.staff_id = ? 
+       AND a.start_time >= ? 
+       AND a.status NOT IN ('cancelled', 'completed', 'no_show')
+       ORDER BY a.start_time ASC`,
+      [tenantId, id, now]
+    );
+
+    res.json({ success: true, data: appointments });
+  } catch (error) {
+    console.error('Get staff appointments error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch appointments' });
+  }
+});
+
+// ─── Reassign appointments ─────────────────────────────
+// ═══════════════════════════════════════════════════════
+router.patch('/:id/reassign-appointments', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { new_staff_id, appointment_ids } = req.body;
+    const tenantId = req.tenantId;
+
+    if (!new_staff_id) {
+      return res.status(400).json({ success: false, message: 'New staff ID is required' });
+    }
+
+    // Verify new staff exists and is active
+    const [newStaff] = await query(
+      'SELECT id, full_name, is_active FROM staff WHERE id = ? AND tenant_id = ?',
+      [new_staff_id, tenantId]
+    );
+
+    if (!newStaff) {
+      return res.status(404).json({ success: false, message: 'New staff member not found' });
+    }
+
+    if (!newStaff.is_active) {
+      return res.status(400).json({ success: false, message: 'Cannot reassign to inactive staff member' });
+    }
+
+    // Get appointments to reassign
+    let appointments;
+    if (appointment_ids && appointment_ids.length > 0) {
+      // Reassign specific appointments
+      const placeholders = appointment_ids.map(() => '?').join(',');
+      appointments = await query(
+        `SELECT id, start_time, end_time FROM appointments 
+         WHERE tenant_id = ? AND staff_id = ? AND id IN (${placeholders})
+         AND status NOT IN ('cancelled', 'completed', 'no_show')`,
+        [tenantId, id, ...appointment_ids]
+      );
+    } else {
+      // Reassign all upcoming appointments
+      const now = new Date();
+      appointments = await query(
+        `SELECT id, start_time, end_time FROM appointments 
+         WHERE tenant_id = ? AND staff_id = ? 
+         AND start_time >= ? 
+         AND status NOT IN ('cancelled', 'completed', 'no_show')`,
+        [tenantId, id, now]
+      );
+    }
+
+    if (appointments.length === 0) {
+      return res.json({ success: true, message: 'No appointments to reassign', reassigned: 0 });
+    }
+
+    // Reassign appointments
+    const appointmentIds = appointments.map(a => a.id);
+    const placeholders = appointmentIds.map(() => '?').join(',');
+    await execute(
+      `UPDATE appointments SET staff_id = ? WHERE id IN (${placeholders}) AND tenant_id = ?`,
+      [new_staff_id, ...appointmentIds, tenantId]
+    );
+
+    // Cancel any scheduled reminders for old staff and reschedule for new staff
+    try {
+      const { cancelRemindersForAppointments, scheduleAppointmentReminders } = await import('../lib/reminders.js');
+      for (const apt of appointments) {
+        await cancelRemindersForAppointments([apt.id]);
+        // Reschedule reminders for new staff
+        const [appointment] = await query(
+          'SELECT customer_id FROM appointments WHERE id = ?',
+          [apt.id]
+        );
+        if (appointment) {
+          await scheduleAppointmentReminders(tenantId, apt.id, apt.start_time, appointment.customer_id);
+        }
+      }
+    } catch (reminderError) {
+      console.warn('Could not update reminders:', reminderError.message);
+    }
+
+    res.json({ 
+      success: true, 
+      message: `Reassigned ${appointments.length} appointment(s) to ${newStaff.full_name}`,
+      reassigned: appointments.length
+    });
+  } catch (error) {
+    console.error('Reassign appointments error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reassign appointments' });
+  }
+});
+
 // ─── Toggle active status ──────────────────────────────
 // ═══════════════════════════════════════════════════════
 router.patch('/:id/toggle-active', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
+    const { auto_reassign_to_admin } = req.body; // Optional: auto-reassign flag
+    const tenantId = req.tenantId;
+
     if (parseInt(id) === req.user.id) {
       return res.status(400).json({ success: false, message: 'Cannot deactivate yourself' });
     }
+
     const [current] = await query('SELECT is_active FROM staff WHERE id = ?', [id]);
     if (!current) return res.status(404).json({ success: false, message: 'Staff not found' });
 
+    // Only check for appointments when deactivating (not activating)
+    if (current.is_active) {
+      const now = new Date();
+      const upcomingAppointments = await query(
+        `SELECT COUNT(*) as count FROM appointments 
+         WHERE tenant_id = ? AND staff_id = ? 
+         AND start_time >= ? 
+         AND status NOT IN ('cancelled', 'completed', 'no_show')`,
+        [tenantId, id, now]
+      );
+
+      const appointmentCount = upcomingAppointments[0]?.count || 0;
+
+      if (appointmentCount > 0) {
+        // If auto_reassign_to_admin is true, find admin and reassign
+        if (auto_reassign_to_admin) {
+          // Find an admin user
+          const [admin] = await query(
+            'SELECT id, full_name FROM staff WHERE tenant_id = ? AND role = ? AND is_active = 1 LIMIT 1',
+            [tenantId, 'admin']
+          );
+
+          if (admin) {
+            // Reassign all appointments to admin
+            await execute(
+              `UPDATE appointments SET staff_id = ? 
+               WHERE tenant_id = ? AND staff_id = ? 
+               AND start_time >= ? 
+               AND status NOT IN ('cancelled', 'completed', 'no_show')`,
+              [admin.id, tenantId, id, now]
+            );
+
+            // Update reminders
+            try {
+              const appointments = await query(
+                `SELECT id, start_time, customer_id FROM appointments 
+                 WHERE tenant_id = ? AND staff_id = ? 
+                 AND start_time >= ? 
+                 AND status NOT IN ('cancelled', 'completed', 'no_show')`,
+                [tenantId, admin.id, now]
+              );
+              const { cancelRemindersForAppointments, scheduleAppointmentReminders } = await import('../lib/reminders.js');
+              for (const apt of appointments) {
+                await cancelRemindersForAppointments([apt.id]);
+                await scheduleAppointmentReminders(tenantId, apt.id, apt.start_time, apt.customer_id);
+              }
+            } catch (reminderError) {
+              console.warn('Could not update reminders:', reminderError.message);
+            }
+
+            // Now deactivate
+            await execute('UPDATE staff SET is_active = ? WHERE id = ?', [0, id]);
+            return res.json({ 
+              success: true, 
+              message: `Team member deactivated. ${appointmentCount} appointment(s) automatically reassigned to ${admin.full_name}`,
+              appointments_reassigned: appointmentCount
+            });
+          } else {
+            return res.status(400).json({ 
+              success: false, 
+              message: `Cannot auto-reassign: No active admin found. This staff member has ${appointmentCount} upcoming appointment(s).`,
+              has_appointments: true,
+              appointment_count: appointmentCount
+            });
+          }
+        } else {
+          // Return appointments info for frontend to handle
+          return res.status(400).json({ 
+            success: false, 
+            message: `This staff member has ${appointmentCount} upcoming appointment(s). Please reassign them first.`,
+            has_appointments: true,
+            appointment_count: appointmentCount
+          });
+        }
+      }
+    }
+
+    // No appointments or activating - proceed normally
     const newStatus = current.is_active ? 0 : 1;
     await execute('UPDATE staff SET is_active = ? WHERE id = ?', [newStatus, id]);
     res.json({ success: true, message: newStatus ? 'Team member activated' : 'Team member deactivated' });

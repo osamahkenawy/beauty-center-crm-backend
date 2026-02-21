@@ -3,6 +3,7 @@ import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { redeemGiftCard } from './gift-cards.js';
 import { notifyAppointment, notifyAppointmentCancelled } from '../lib/notify.js';
+import { sendNotificationEmail } from '../lib/email.js';
 
 const router = express.Router();
 
@@ -61,11 +62,12 @@ router.post('/', async (req, res) => {
     const mysqlStartTime = toMySQLDateTime(start_time);
     const mysqlEndTime = toMySQLDateTime(end_time);
 
-    // Check for conflicts
+    // Check for conflicts (exclude cancelled, no_show, and completed appointments)
+    // Completed appointments have their end_time updated to actual completion time, so they won't block future bookings
     const conflicts = await query(
       `SELECT id FROM appointments 
        WHERE tenant_id = ? AND staff_id = ? 
-       AND status NOT IN ('cancelled', 'no_show')
+       AND status NOT IN ('cancelled', 'no_show', 'completed')
        AND (
          (start_time < ? AND end_time > ?) OR
          (start_time >= ? AND start_time < ?)
@@ -148,18 +150,12 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Create reminder (24 hours before) - optional, don't fail if table doesn't exist
+    // Schedule reminders using the reminder service
     try {
-      const reminderTime = new Date(start_time);
-      reminderTime.setDate(reminderTime.getDate() - 1);
-      
-      await execute(
-        `INSERT INTO appointment_reminders (appointment_id, send_at, method)
-         VALUES (?, ?, 'email')`,
-        [result.insertId, toMySQLDateTime(reminderTime.toISOString())]
-      );
+      const { scheduleAppointmentReminders } = await import('../lib/reminders.js');
+      await scheduleAppointmentReminders(tenantId, result.insertId, start_time, customer_id);
     } catch (reminderError) {
-      console.warn('Could not create appointment reminder:', reminderError.message);
+      console.warn('Could not schedule appointment reminders:', reminderError.message);
     }
 
     // Get created appointment with details
@@ -184,6 +180,59 @@ router.post('/', async (req, res) => {
       { appointment_id: result.insertId, customer_id, service_id, staff_id }
     ).catch(() => {});
 
+    // Send confirmation email to customer
+    if (customer_id) {
+      try {
+        const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [customer_id]);
+        if (customer && customer.email) {
+          const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Client';
+          const appointmentDate = new Date(start_time);
+          const dateStr = appointmentDate.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+          });
+          const timeStr = appointmentDate.toLocaleTimeString('en-US', { 
+            hour: 'numeric', 
+            minute: '2-digit',
+            hour12: true 
+          });
+          
+          const emailResult = await sendNotificationEmail({
+            to: customer.email,
+            subject: `Appointment Confirmed — ${appointment?.service_name || 'Service'} on ${dateStr}`,
+            title: `Appointment Confirmed ✅`,
+            body: `
+              <p>Dear ${customerName},</p>
+              <p>Your appointment has been confirmed!</p>
+              <ul>
+                <li><strong>Service:</strong> ${appointment?.service_name || 'Service'}</li>
+                <li><strong>Date:</strong> ${dateStr}</li>
+                <li><strong>Time:</strong> ${timeStr}</li>
+                <li><strong>Staff:</strong> ${appointment?.staff_name || 'Our team'}</li>
+              </ul>
+              <p>We look forward to seeing you!</p>
+              <p>If you need to reschedule or cancel, please contact us as soon as possible.</p>
+            `,
+            tenantId,
+          });
+          
+          if (emailResult.success) {
+            console.log(`✅ Appointment confirmation email sent to ${customer.email}`);
+          } else {
+            console.error(`❌ Failed to send appointment confirmation email to ${customer.email}:`, emailResult.error);
+          }
+        } else {
+          console.log(`⚠️  Appointment created but customer ${customer_id} has no email address`);
+        }
+      } catch (emailErr) {
+        console.error('Error sending appointment confirmation email:', emailErr);
+      }
+    } else {
+      console.log('⚠️  Appointment created but no customer_id provided');
+    }
+
     res.status(201).json({
       success: true,
       data: appointment,
@@ -205,11 +254,53 @@ router.get('/', async (req, res) => {
     const { staff_id, customer_id, status, from_date, to_date, date, page = 1, limit = 10, all } = req.query;
     const tenantId = req.tenantId;
 
+    // Check role-based access: can user view all appointments or only their own?
+    const user = req.user;
+    const rolePerms = user?.rolePermissions || {};
+    const apptPerms = rolePerms.appointments || {};
+    
+    // Check if user has view permission at all
+    if (!apptPerms.view && user?.role !== 'admin' && user?.is_owner !== 1 && user?.role !== 'manager') {
+      return res.status(403).json({ success: false, message: 'You do not have permission to view appointments' });
+    }
+    
+    // Check if user can view all appointments
+    // If view_scope is 'all' or view_all is true, they can see all
+    // If view_scope is 'own' or not set, they can only see their own
+    const viewScope = apptPerms.view_scope || 'own'; // Default to 'own' if not set
+    const canViewAll = viewScope === 'all' || apptPerms.view_all === true;
+    
+    // If user is admin/owner/manager, they can always view all
+    const isAdmin = user?.role === 'admin' || user?.is_owner === 1 || user?.role === 'manager';
+    
+    // Debug logging (remove in production)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[Appointments Filter]', {
+        userId: user.id,
+        role: user.role,
+        isAdmin,
+        viewScope,
+        canViewAll,
+        apptPerms,
+        hasView: apptPerms.view
+      });
+    }
+    
     // Base WHERE clause
     let whereClause = `WHERE a.tenant_id = ?`;
     const params = [tenantId];
 
-    if (staff_id) {
+    // Apply role-based filtering: if user can only view own, filter by their staff_id
+    // Unless they explicitly requested a specific staff_id filter
+    if (!isAdmin && !canViewAll && !staff_id) {
+      // User can only view their own appointments (where they are the assigned staff)
+      whereClause += ` AND a.staff_id = ?`;
+      params.push(user.id);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[Appointments Filter] Filtering by staff_id:', user.id);
+      }
+    } else if (staff_id) {
+      // Explicit staff_id filter from query params (admin/manager can filter by any staff)
       whereClause += ` AND a.staff_id = ?`;
       params.push(staff_id);
     }
@@ -228,14 +319,24 @@ router.get('/', async (req, res) => {
       whereClause += ` AND DATE(a.start_time) = ?`;
       params.push(date);
     } else {
-      if (from_date) {
-        whereClause += ` AND DATE(a.start_time) >= ?`;
-        params.push(from_date);
-      }
-
-      if (to_date) {
+      // If only from_date is provided (without to_date), match exact date
+      // If both from_date and to_date are provided, use date range
+      if (from_date && !to_date) {
+        // Only from_date: match exact date
+        const fromDateStr = from_date.split('T')[0]; // Remove time if present
+        whereClause += ` AND DATE(a.start_time) = ?`;
+        params.push(fromDateStr);
+      } else if (from_date && to_date) {
+        // Both dates: use date range
+        const fromDateStr = from_date.split('T')[0]; // Remove time if present
+        const toDateStr = to_date.split('T')[0]; // Remove time if present
+        whereClause += ` AND DATE(a.start_time) >= ? AND DATE(a.start_time) <= ?`;
+        params.push(fromDateStr, toDateStr);
+      } else if (to_date && !from_date) {
+        // Only to_date: from beginning until to_date
+        const toDateStr = to_date.split('T')[0]; // Remove time if present
         whereClause += ` AND DATE(a.start_time) <= ?`;
-        params.push(to_date);
+        params.push(toDateStr);
       }
     }
 
@@ -380,12 +481,43 @@ router.patch('/:id', async (req, res) => {
       return res.status(400).json({ success: false, message: 'No fields to update' });
     }
 
+    // If status is being changed to 'completed', update end_time to current time if completed early
+    if (status === 'completed' && existing.status !== 'completed') {
+      const now = new Date();
+      const scheduledEndTime = new Date(existing.end_time);
+      if (now < scheduledEndTime) {
+        // Completed early - update end_time to current time to free up the slot
+        // Only add if end_time is not already being updated
+        if (end_time === undefined) {
+          updates.push('end_time = ?');
+          params.push(toMySQLDateTime(now.toISOString()));
+        }
+      }
+    }
+
     params.push(id, tenantId);
 
     await execute(
       `UPDATE appointments SET ${updates.join(', ')} WHERE id = ? AND tenant_id = ?`,
       params
     );
+
+    // Handle reminders based on changes
+    try {
+      const { cancelAppointmentReminders, rescheduleAppointmentReminders } = await import('../lib/reminders.js');
+      
+      // If status changed to cancelled, cancel reminders
+      if (status === 'cancelled') {
+        await cancelAppointmentReminders(id);
+      }
+      
+      // If start_time changed, reschedule reminders
+      if (start_time !== undefined && start_time !== existing.start_time) {
+        await rescheduleAppointmentReminders(tenantId, id, start_time);
+      }
+    } catch (reminderError) {
+      console.warn('Could not update reminders:', reminderError.message);
+    }
 
     // Get updated appointment
     const [appointment] = await query(
@@ -478,10 +610,19 @@ router.post('/:id/checkout', async (req, res) => {
       return res.status(400).json({ success: false, message: `Cannot checkout a ${apt.status} appointment` });
     }
 
-    // 2. Mark appointment as completed
+    // 2. Mark appointment as completed and update end_time if completed early
+    const now = new Date();
+    const scheduledEndTime = new Date(apt.end_time);
+    const actualEndTime = now < scheduledEndTime ? now : scheduledEndTime; // Use current time if earlier than scheduled
+    
     await execute(
-      `UPDATE appointments SET status = 'completed', customer_showed = 1, payment_status = ? WHERE id = ? AND tenant_id = ?`,
-      [pay_now ? 'paid' : 'pending', id, tenantId]
+      `UPDATE appointments 
+       SET status = 'completed', 
+           customer_showed = 1, 
+           payment_status = ?,
+           end_time = ?
+       WHERE id = ? AND tenant_id = ?`,
+      [pay_now ? 'paid' : 'pending', toMySQLDateTime(actualEndTime.toISOString()), id, tenantId]
     );
 
     // 3. Check if invoice already exists
@@ -608,6 +749,14 @@ router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenantId;
 
+    // Cancel reminders before deleting
+    try {
+      const { cancelAppointmentReminders } = await import('../lib/reminders.js');
+      await cancelAppointmentReminders(id);
+    } catch (reminderError) {
+      console.warn('Could not cancel reminders:', reminderError.message);
+    }
+
     const result = await execute(
       'DELETE FROM appointments WHERE id = ? AND tenant_id = ?',
       [id, tenantId]
@@ -637,6 +786,69 @@ router.get('/staff/:staff_id/availability', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Date required' });
     }
 
+    // Get day of week (0 = Sunday, 6 = Saturday)
+    const dateObj = new Date(date);
+    const dayOfWeek = dateObj.getDay();
+
+    // Check if staff has a day off on this date
+    const [dayOff] = await query(
+      `SELECT id FROM staff_days_off 
+       WHERE tenant_id = ? AND staff_id = ? AND date = ?`,
+      [tenantId, staff_id, date]
+    );
+
+    if (dayOff) {
+      // Staff is off on this day
+      return res.json({ 
+        success: true, 
+        data: { 
+          date, 
+          slots: [],
+          workingHours: null,
+          isDayOff: true
+        } 
+      });
+    }
+
+    // Get staff schedule for this day of week
+    const [schedule] = await query(
+      `SELECT start_time, end_time, break_start, break_end, is_working
+       FROM staff_schedule
+       WHERE tenant_id = ? AND staff_id = ? AND day_of_week = ? AND is_working = 1
+       LIMIT 1`,
+      [tenantId, staff_id, dayOfWeek]
+    );
+
+    // Default working hours if no schedule found (8 AM - 6 PM)
+    let startHour = 8;
+    let startMin = 0;
+    let endHour = 18;
+    let endMin = 0;
+    let breakStart = null;
+    let breakEnd = null;
+
+    if (schedule) {
+      // Parse start_time (HH:MM:SS format)
+      const [startH, startM] = schedule.start_time.split(':').map(Number);
+      startHour = startH;
+      startMin = startM;
+
+      // Parse end_time (HH:MM:SS format)
+      const [endH, endM] = schedule.end_time.split(':').map(Number);
+      endHour = endH;
+      endMin = endM;
+
+      // Parse break times if available
+      if (schedule.break_start) {
+        const [breakSH, breakSM] = schedule.break_start.split(':').map(Number);
+        breakStart = { hour: breakSH, minute: breakSM };
+      }
+      if (schedule.break_end) {
+        const [breakEH, breakEM] = schedule.break_end.split(':').map(Number);
+        breakEnd = { hour: breakEH, minute: breakEM };
+      }
+    }
+
     // Get all appointments for that day
     const dayStart = new Date(date);
     dayStart.setHours(0, 0, 0, 0);
@@ -648,32 +860,60 @@ router.get('/staff/:staff_id/availability', async (req, res) => {
       `SELECT start_time, end_time FROM appointments
        WHERE tenant_id = ? AND staff_id = ? 
        AND start_time >= ? AND start_time <= ?
-       AND status NOT IN ('cancelled', 'no_show')
+       AND status NOT IN ('cancelled', 'no_show', 'completed')
        ORDER BY start_time`,
       [tenantId, staff_id, dayStart, dayEnd]
     );
 
-    // Generate 30-min slots from 8 AM to 6 PM
+    // Generate 30-min slots based on working hours
     const slots = [];
-    for (let hour = 8; hour < 18; hour++) {
-      for (let min = 0; min < 60; min += 30) {
-        const slotTime = new Date(date);
-        slotTime.setHours(hour, min, 0, 0);
-        
-        const isBooked = booked.some(b => {
-          const startTime = new Date(b.start_time);
-          const endTime = new Date(b.end_time);
-          return slotTime >= startTime && slotTime < endTime;
-        });
+    const slotInterval = 30; // 30 minutes
 
-        slots.push({
-          time: slotTime.toISOString(),
-          available: !isBooked
-        });
+    // Calculate total minutes for start and end
+    const startTotalMinutes = startHour * 60 + startMin;
+    const endTotalMinutes = endHour * 60 + endMin;
+
+    for (let totalMinutes = startTotalMinutes; totalMinutes < endTotalMinutes; totalMinutes += slotInterval) {
+      const hour = Math.floor(totalMinutes / 60);
+      const minute = totalMinutes % 60;
+
+      // Skip if in break time
+      if (breakStart && breakEnd) {
+        const breakStartMinutes = breakStart.hour * 60 + breakStart.minute;
+        const breakEndMinutes = breakEnd.hour * 60 + breakEnd.minute;
+        if (totalMinutes >= breakStartMinutes && totalMinutes < breakEndMinutes) {
+          continue; // Skip break time
+        }
       }
+
+      const slotTime = new Date(date);
+      slotTime.setHours(hour, minute, 0, 0);
+      
+      const isBooked = booked.some(b => {
+        const startTime = new Date(b.start_time);
+        const endTime = new Date(b.end_time);
+        return slotTime >= startTime && slotTime < endTime;
+      });
+
+      slots.push({
+        time: slotTime.toISOString(),
+        available: !isBooked
+      });
     }
 
-    res.json({ success: true, data: { date, slots } });
+    res.json({ 
+      success: true, 
+      data: { 
+        date, 
+        slots,
+        workingHours: schedule ? {
+          start: schedule.start_time,
+          end: schedule.end_time,
+          break_start: schedule.break_start,
+          break_end: schedule.break_end
+        } : null
+      } 
+    });
   } catch (error) {
     console.error('Error fetching availability:', error);
     res.status(500).json({ success: false, message: 'Server error' });

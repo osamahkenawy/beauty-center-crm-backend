@@ -2,8 +2,10 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import cron from 'node-cron';
 import { config } from './config.js';
 import { initDatabase } from './lib/database.js';
+import { processPendingReminders } from './lib/reminders.js';
 
 // Import middleware
 import { tenantMiddleware } from './middleware/tenant.js';
@@ -12,6 +14,7 @@ import { tenantMiddleware } from './middleware/tenant.js';
 import authRoutes from './routes/auth.js';
 import tenantsRoutes from './routes/tenants.js';
 import staffRoutes from './routes/staff.js';
+import staffPublicRoutes from './routes/staff-public.js';
 import accountsRoutes from './routes/accounts.js';
 import contactsRoutes from './routes/contacts.js';
 import leadsRoutes from './routes/leads.js';
@@ -99,6 +102,8 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/tenants', tenantsRoutes);
 app.use('/api/public/booking', publicBookingRoutes);
+// Public staff routes (set password - no tenant required)
+app.use('/api/staff/set-password', staffPublicRoutes);
 
 // Super Admin routes (Trasealla platform management)
 app.use('/api/super-admin', superAdminRoutes);
@@ -170,6 +175,19 @@ app.use((err, req, res, next) => {
 async function start() {
   try {
     await initDatabase();
+    
+    // Start reminder cron job (runs every minute)
+    cron.schedule('* * * * *', async () => {
+      try {
+        const result = await processPendingReminders();
+        if (result.processed > 0) {
+          console.log(`📅 Reminders: ${result.sent} sent, ${result.failed} failed`);
+        }
+      } catch (error) {
+        console.error('❌ Reminder cron job error:', error);
+      }
+    });
+    console.log('✅ Reminder cron job started (runs every minute)');
     
     app.listen(config.port, () => {
       console.log(`

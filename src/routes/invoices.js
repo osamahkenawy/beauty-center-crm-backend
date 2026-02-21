@@ -4,6 +4,8 @@ import { authMiddleware } from '../middleware/auth.js';
 import { processAutoEarn, redeemLoyaltyForPayment } from './loyalty.js';
 import { redeemGiftCard } from './gift-cards.js';
 import { notifyInvoice, notifyPayment } from '../lib/notify.js';
+import { sendNotificationEmail } from '../lib/email.js';
+import { generateInvoicePDF, getTenantInfo } from '../lib/pdf.js';
 
 const router = express.Router();
 
@@ -101,9 +103,56 @@ router.get('/', async (req, res) => {
   try {
     await ensureTables();
     const t = req.tenantId;
-    const { status, customer_id, from_date, to_date, search, page = 1, limit = 20 } = req.query;
+    const { status, customer_id, from_date, to_date, search, page = 1, limit = 20, staff_id } = req.query;
     let where = 'WHERE i.tenant_id = ?';
     const params = [t];
+
+    // Check role-based access: can user view all invoices or only their own?
+    const user = req.user;
+    const rolePerms = user?.rolePermissions || {};
+    const invoicePerms = rolePerms.invoices || {};
+    
+    // Check if user has view permission at all
+    if (!invoicePerms.view && user?.role !== 'admin' && user?.is_owner !== 1 && user?.role !== 'manager') {
+      return res.status(403).json({ success: false, message: 'You do not have permission to view invoices' });
+    }
+    
+    // Check if user can view all invoices
+    // If view_scope is 'all' or view_all is true, they can see all
+    // If view_scope is 'own' or not set, they can only see their own
+    const viewScope = invoicePerms.view_scope || 'own'; // Default to 'own' if not set
+    const canViewAll = viewScope === 'all' || invoicePerms.view_all === true;
+    
+    // If user is admin/owner/manager, they can always view all
+    const isAdmin = user?.role === 'admin' || user?.is_owner === 1 || user?.role === 'manager';
+    
+    // Debug logging (remove in production)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[Invoices Filter]', {
+        userId: user.id,
+        role: user.role,
+        isAdmin,
+        viewScope,
+        canViewAll,
+        invoicePerms,
+        hasView: invoicePerms.view
+      });
+    }
+    
+    // Apply role-based filtering: if user can only view own, filter by their staff_id
+    // Unless they explicitly requested a specific staff_id filter
+    if (!isAdmin && !canViewAll && !staff_id) {
+      // User can only view their own invoices (where they are the assigned staff)
+      where += ' AND i.staff_id = ?';
+      params.push(user.id);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[Invoices Filter] Filtering by staff_id:', user.id);
+      }
+    } else if (staff_id) {
+      // Explicit staff_id filter from query params (admin/manager can filter by any staff)
+      where += ' AND i.staff_id = ?';
+      params.push(staff_id);
+    }
 
     if (status) { where += ' AND i.status = ?'; params.push(status); }
     if (customer_id) { where += ' AND i.customer_id = ?'; params.push(customer_id); }
@@ -138,6 +187,47 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('List invoices error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── Generate PDF for invoice (must be before /:id route) ──
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    await ensureTables();
+    const [invoice] = await query(`
+      SELECT i.*,
+        c.first_name as customer_first_name, c.last_name as customer_last_name,
+        c.email as customer_email, c.phone as customer_phone,
+        s.full_name as staff_name,
+        b.name as branch_name
+      FROM invoices i
+      LEFT JOIN contacts c ON i.customer_id = c.id
+      LEFT JOIN staff s ON i.staff_id = s.id
+      LEFT JOIN branches b ON i.branch_id = b.id
+      WHERE i.id = ? AND i.tenant_id = ?
+    `, [req.params.id, req.tenantId]);
+
+    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    // Get invoice items
+    const items = await query('SELECT * FROM invoice_items WHERE invoice_id = ?', [invoice.id]);
+    invoice.items = items;
+
+    // Get tenant info
+    const tenantInfo = await getTenantInfo(req.tenantId);
+
+    // Generate PDF
+    const pdfBuffer = await generateInvoicePDF(invoice, tenantInfo);
+
+    // Set response headers
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="invoice-${invoice.invoice_number}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Generate PDF error:', error);
+    res.status(500).json({ success: false, message: 'Failed to generate PDF', error: error.message });
   }
 });
 
@@ -256,6 +346,35 @@ router.post('/', async (req, res) => {
 
     // Push notification
     notifyInvoice(req.tenantId, `Invoice ${invoiceNumber} Created`, `Total: ${total.toFixed(2)} ${currency}`, { invoice_id: invoiceId, total }).catch(() => {});
+
+    // Send email if status is 'sent' and customer has email
+    if (status === 'sent' && customer_id) {
+      try {
+        const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [customer_id]);
+        if (customer && customer.email) {
+          const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Client';
+          await sendNotificationEmail({
+            to: customer.email,
+            subject: `Invoice ${invoiceNumber} from ${currency} ${total.toFixed(2)}`,
+            title: `Invoice ${invoiceNumber}`,
+            body: `
+              <p>Dear ${customerName},</p>
+              <p>Your invoice has been generated:</p>
+              <ul>
+                <li><strong>Invoice Number:</strong> ${invoiceNumber}</li>
+                <li><strong>Total Amount:</strong> ${currency} ${total.toFixed(2)}</li>
+                ${due_date ? `<li><strong>Due Date:</strong> ${new Date(due_date).toLocaleDateString()}</li>` : ''}
+              </ul>
+              <p>Please complete your payment at your earliest convenience.</p>
+              <p>Thank you for your business!</p>
+            `,
+            tenantId: req.tenantId,
+          }).catch(err => console.error('Failed to send invoice email:', err.message));
+        }
+      } catch (emailErr) {
+        console.error('Error sending invoice email:', emailErr);
+      }
+    }
 
     res.status(201).json({ success: true, data: {
       id: invoiceId, invoice_number: invoiceNumber,
@@ -545,6 +664,45 @@ router.post('/:id/pay', async (req, res) => {
       `${totalAmount.toFixed(2)} via ${payment_method}`,
       { invoice_id: inv.id, amount: totalAmount, method: payment_method }
     ).catch(() => {});
+
+    // Send payment confirmation email
+    if (inv.customer_id) {
+      try {
+        const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [inv.customer_id]);
+        if (customer && customer.email) {
+          const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Client';
+          const paymentParts = [];
+          if (loyaltyAmt > 0) paymentParts.push(`${loyaltyAmt} loyalty points`);
+          if (remainingAfterLoyalty > 0) paymentParts.push(`${remainingAfterLoyalty} via ${payment_method}`);
+          
+          await sendNotificationEmail({
+            to: customer.email,
+            subject: newStatus === 'paid' 
+              ? `Payment Confirmation — Invoice ${inv.invoice_number}`
+              : `Partial Payment Received — Invoice ${inv.invoice_number}`,
+            title: newStatus === 'paid' 
+              ? `Payment Confirmed — Invoice ${inv.invoice_number}`
+              : `Partial Payment Received`,
+            body: `
+              <p>Dear ${customerName},</p>
+              <p>${newStatus === 'paid' ? 'Thank you! Your payment has been received and your invoice is now fully paid.' : 'We have received a partial payment on your invoice.'}</p>
+              <ul>
+                <li><strong>Invoice Number:</strong> ${inv.invoice_number}</li>
+                <li><strong>Amount Paid:</strong> ${inv.currency} ${totalAmount.toFixed(2)}</li>
+                <li><strong>Payment Method:</strong> ${paymentParts.join(' + ') || payment_method}</li>
+                <li><strong>Total Paid:</strong> ${inv.currency} ${newPaid.toFixed(2)} of ${inv.currency} ${parseFloat(currentInv.total).toFixed(2)}</li>
+                ${newStatus === 'paid' ? '<li><strong>Status:</strong> Fully Paid ✅</li>' : `<li><strong>Remaining Balance:</strong> ${inv.currency} ${(parseFloat(currentInv.total) - newPaid).toFixed(2)}</li>`}
+              </ul>
+              ${loyaltyResult ? `<p><strong>Bonus:</strong> You earned ${loyaltyResult.points_earned} loyalty points!</p>` : ''}
+              <p>Thank you for your payment!</p>
+            `,
+            tenantId: req.tenantId,
+          }).catch(err => console.error('Failed to send payment email:', err.message));
+        }
+      } catch (emailErr) {
+        console.error('Error sending payment email:', emailErr);
+      }
+    }
 
     res.json({ 
       success: true, 

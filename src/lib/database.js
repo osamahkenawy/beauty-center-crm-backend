@@ -752,16 +752,26 @@ async function createTables() {
   await execute(`
     CREATE TABLE IF NOT EXISTS appointment_reminders (
       id INT AUTO_INCREMENT PRIMARY KEY,
+      tenant_id INT,
       appointment_id INT NOT NULL,
+      reminder_type VARCHAR(50) DEFAULT 'appointment_upcoming',
       send_at DATETIME,
-      method ENUM('email', 'sms', 'whatsapp') DEFAULT 'email',
+      method ENUM('email', 'sms', 'whatsapp', 'in_app') DEFAULT 'email',
       sent_at DATETIME,
       status ENUM('pending', 'sent', 'failed') DEFAULT 'pending',
+      retry_count INT DEFAULT 0,
+      error_message TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_appointment (appointment_id),
+      INDEX idx_tenant (tenant_id),
       INDEX idx_send_at (send_at),
-      INDEX idx_status (status)
+      INDEX idx_status (status),
+      INDEX idx_reminder_type (reminder_type)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+  
+  // Ensure additional columns exist (for existing tables)
+  await ensureReminderColumns();
 
   // Staff schedule table
   await execute(`
@@ -1221,6 +1231,50 @@ async function createDefaultTenantAndAdmin() {
         await execute(`UPDATE ${table} SET tenant_id = ? WHERE tenant_id IS NULL`, [tenantId]);
       } catch (e) { /* ignore */ }
     }
+  }
+}
+
+/**
+ * Ensure appointment_reminders table has all required columns
+ */
+async function ensureReminderColumns() {
+  const columns = [
+    ['tenant_id', 'INT'],
+    ['reminder_type', "VARCHAR(50) DEFAULT 'appointment_upcoming'"],
+    ['retry_count', 'INT DEFAULT 0'],
+    ['error_message', 'TEXT'],
+    ['created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'],
+  ];
+  
+  // Also update method ENUM to include 'in_app'
+  try {
+    await execute(`
+      ALTER TABLE appointment_reminders 
+      MODIFY COLUMN method ENUM('email', 'sms', 'whatsapp', 'in_app') DEFAULT 'email'
+    `);
+  } catch (e) {
+    // Column might not exist or already updated
+  }
+  
+  for (const [col, def] of columns) {
+    try {
+      await execute(`ALTER TABLE appointment_reminders ADD COLUMN ${col} ${def}`);
+    } catch (e) {
+      // Column already exists - that's fine
+    }
+  }
+  
+  // Add indexes if they don't exist
+  try {
+    await execute(`CREATE INDEX idx_tenant ON appointment_reminders(tenant_id)`);
+  } catch (e) {
+    // Index already exists
+  }
+  
+  try {
+    await execute(`CREATE INDEX idx_reminder_type ON appointment_reminders(reminder_type)`);
+  } catch (e) {
+    // Index already exists
   }
 }
 

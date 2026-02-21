@@ -2,6 +2,7 @@ import express from 'express';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { notifyClient } from '../lib/notify.js';
+import { sendNotificationEmail } from '../lib/email.js';
 
 const router = express.Router();
 
@@ -329,6 +330,34 @@ router.post('/', authMiddleware, async (req, res) => {
 
     // Push notification
     notifyClient(tid, `New Client — ${first_name} ${last_name || ''}`.trim(), email || phone || 'Added via dashboard', { client_id: result.insertId }).catch(() => {});
+
+    // Send welcome email if email provided
+    if (email) {
+      try {
+        await sendNotificationEmail({
+          to: email,
+          subject: `Welcome to ${first_name}! 👋`,
+          title: `Welcome! We're Excited to Have You`,
+          body: `
+            <p>Dear ${first_name}${last_name ? ` ${last_name}` : ''},</p>
+            <p>Welcome to our beauty center! We're thrilled to have you as part of our community.</p>
+            <p>We're here to help you look and feel your best. Whether you're looking for a new style, a relaxing treatment, or expert advice, our team is ready to serve you.</p>
+            <p><strong>What's next?</strong></p>
+            <ul>
+              <li>Book your first appointment</li>
+              <li>Explore our services</li>
+              <li>Join our loyalty program to earn rewards</li>
+            </ul>
+            <p>If you have any questions or special requests, don't hesitate to reach out to us.</p>
+            <p>We look forward to seeing you soon!</p>
+            <p>Best regards,<br>The Team</p>
+          `,
+          tenantId: tid,
+        }).catch(err => console.error('Failed to send welcome email:', err.message));
+      } catch (emailErr) {
+        console.error('Error sending welcome email:', emailErr);
+      }
+    }
 
     res.json({ success: true, message: 'Client created successfully', data: { id: result.insertId } });
   } catch (error) {

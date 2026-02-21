@@ -504,6 +504,68 @@ router.patch('/preferences', async (req, res) => {
 // AUTO-GENERATE: Check & create reminder notifications
 // ════════════════════════════════════════════════════════════════
 
+// ─── POST /notifications/test-email ─ Send test email ──
+router.post('/test-email', async (req, res) => {
+  try {
+    const { to = 'osamaalaa133@gmail.com', subject, body } = req.body;
+    const tenantId = req.tenantId;
+    
+    const { sendNotificationEmail } = await import('../lib/email.js');
+    
+    const result = await sendNotificationEmail({
+      to,
+      subject: subject || 'Test Email - Appointment Reminder',
+      title: subject || 'Test Email - Appointment Reminder',
+      body: body || `
+        <h2>This is a test email from Trasealla CRM</h2>
+        <p>If you received this email, the email system is working correctly!</p>
+        <p><strong>Test Details:</strong></p>
+        <ul>
+          <li>Date: ${new Date().toLocaleString()}</li>
+          <li>Tenant ID: ${tenantId}</li>
+          <li>Email System: Office 365 SMTP</li>
+        </ul>
+        <p>This email confirms that appointment reminders will be sent successfully.</p>
+      `,
+      tenantId,
+    });
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        message: `Test email sent successfully to ${to}`,
+        data: { messageId: result.messageId },
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: `Failed to send test email: ${result.error}`,
+        error: result.error,
+      });
+    }
+  } catch (error) {
+    console.error('Test email error:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+});
+
+// ─── POST /notifications/process-reminders ─ Process pending appointment reminders ──
+router.post('/process-reminders', async (req, res) => {
+  try {
+    const { processPendingReminders } = await import('../lib/reminders.js');
+    const result = await processPendingReminders();
+    
+    res.json({
+      success: true,
+      message: `Processed ${result.processed} reminders`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Process reminders error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── POST /notifications/generate-reminders ─ Trigger manually ──
 router.post('/generate-reminders', async (req, res) => {
   try {
