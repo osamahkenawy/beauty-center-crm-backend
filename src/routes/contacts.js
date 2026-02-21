@@ -19,6 +19,7 @@ async function ensureColumns() {
     ['instagram', "VARCHAR(100) DEFAULT NULL"],
     ['allergies', "TEXT"],
     ['referral_source', "VARCHAR(100) DEFAULT NULL"],
+    ['is_vip', "TINYINT(1) NOT NULL DEFAULT 0"],
   ];
   for (const [col, def] of cols) {
     try { await execute(`ALTER TABLE contacts ADD COLUMN ${col} ${def}`); } catch (_) { /* exists */ }
@@ -57,11 +58,9 @@ router.get('/stats', authMiddleware, async (req, res) => {
       `SELECT COUNT(*) as cnt FROM contacts WHERE tenant_id = ? AND created_at >= ?`, [tid, monthStart]
     );
 
-    // VIP = gold or platinum loyalty
+    // VIP = contacts with is_vip flag set
     const [vip] = await query(
-      `SELECT COUNT(*) as cnt FROM loyalty_points lp
-       JOIN contacts c ON c.id = lp.customer_id AND c.tenant_id = lp.tenant_id
-       WHERE lp.tenant_id = ? AND lp.tier IN ('gold','platinum')`, [tid]
+      `SELECT COUNT(*) as cnt FROM contacts WHERE tenant_id = ? AND is_vip = 1`, [tid]
     );
 
     // Top spenders
@@ -124,7 +123,7 @@ router.get('/stats', authMiddleware, async (req, res) => {
    ───────────────────────────────────────────── */
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const { page = 1, limit = 100, search, status, source, gender, sort = 'newest' } = req.query;
+    const { page = 1, limit = 100, search, status, source, gender, vip, sort = 'newest' } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const tid = req.tenantId;
 
@@ -167,6 +166,7 @@ router.get('/', authMiddleware, async (req, res) => {
     if (status) { sql += ' AND c.status = ?'; params.push(status); }
     if (source) { sql += ' AND c.source = ?'; params.push(source); }
     if (gender) { sql += ' AND c.gender = ?'; params.push(gender); }
+    if (vip === 'true') { sql += ' AND c.is_vip = 1'; }
 
     // Sorting
     const sortMap = {
@@ -194,6 +194,7 @@ router.get('/', authMiddleware, async (req, res) => {
     if (status) { countSql += ' AND status = ?'; countParams.push(status); }
     if (source) { countSql += ' AND source = ?'; countParams.push(source); }
     if (gender) { countSql += ' AND gender = ?'; countParams.push(gender); }
+    if (vip === 'true') { countSql += ' AND is_vip = 1'; }
 
     const [countResult] = await query(countSql, countParams);
 
@@ -291,7 +292,7 @@ router.post('/', authMiddleware, async (req, res) => {
     const {
       first_name, last_name, email, phone, mobile, gender, date_of_birth,
       notes, tags, source, address, instagram, allergies, referral_source,
-      job_title, department, account_id, is_primary, owner_id
+      job_title, department, account_id, is_primary, owner_id, is_vip
     } = req.body;
 
     if (!first_name?.trim()) {
@@ -313,14 +314,14 @@ router.post('/', authMiddleware, async (req, res) => {
     const result = await execute(
       `INSERT INTO contacts (tenant_id, first_name, last_name, email, phone, mobile, gender, date_of_birth,
         notes, tags, source, address, instagram, allergies, referral_source,
-        job_title, department, account_id, is_primary, owner_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        job_title, department, account_id, is_primary, owner_id, created_by, is_vip)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [tid, first_name.trim(), last_name?.trim() || null, email?.trim() || null, phone?.trim() || null,
        mobile?.trim() || null, gender || null, date_of_birth || null,
        notes || null, tags ? JSON.stringify(tags) : null, source || 'walk-in',
        address || null, instagram || null, allergies || null, referral_source || null,
        job_title || null, department || null, account_id || null, is_primary ? 1 : 0,
-       owner_id || req.user.id, req.user.id]
+       owner_id || req.user.id, req.user.id, is_vip ? 1 : 0]
     );
 
     await execute(
@@ -394,7 +395,7 @@ router.patch('/:id', authMiddleware, async (req, res) => {
     const fields = [
       'first_name', 'last_name', 'email', 'phone', 'mobile', 'gender', 'date_of_birth',
       'notes', 'tags', 'source', 'address', 'instagram', 'allergies', 'referral_source',
-      'job_title', 'department', 'account_id', 'is_primary', 'status', 'owner_id'
+      'job_title', 'department', 'account_id', 'is_primary', 'status', 'owner_id', 'is_vip'
     ];
     const updates = [];
     const params = [];
@@ -403,7 +404,7 @@ router.patch('/:id', authMiddleware, async (req, res) => {
       if (req.body[field] !== undefined) {
         updates.push(`${field} = ?`);
         let value = req.body[field];
-        if (field === 'is_primary') value = value ? 1 : 0;
+        if (field === 'is_primary' || field === 'is_vip') value = value ? 1 : 0;
         if (['account_id', 'owner_id'].includes(field) && value === '') value = null;
         if (field === 'tags' && Array.isArray(value)) value = JSON.stringify(value);
         if (field === 'first_name') value = value?.trim();
@@ -430,6 +431,32 @@ router.patch('/:id', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('Update contact error:', error);
     res.status(500).json({ success: false, message: 'Failed to update client' });
+  }
+});
+
+/* ─────────────────────────────────────────────
+   PATCH /:id/toggle-vip – Toggle VIP status
+   ───────────────────────────────────────────── */
+router.patch('/:id/toggle-vip', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tid = req.tenantId;
+
+    const [contact] = await query('SELECT id, is_vip FROM contacts WHERE id = ? AND tenant_id = ?', [id, tid]);
+    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+
+    const newValue = contact.is_vip ? 0 : 1;
+    await execute('UPDATE contacts SET is_vip = ? WHERE id = ? AND tenant_id = ?', [newValue, id, tid]);
+
+    await execute(
+      'INSERT INTO audit_logs (tenant_id, user_id, action, entity_type, entity_id, new_values) VALUES (?, ?, ?, ?, ?, ?)',
+      [tid, req.user.id, 'toggle_vip', 'contact', id, JSON.stringify({ is_vip: newValue })]
+    );
+
+    res.json({ success: true, message: newValue ? 'Client marked as VIP' : 'VIP status removed', data: { is_vip: newValue } });
+  } catch (error) {
+    console.error('Toggle VIP error:', error);
+    res.status(500).json({ success: false, message: 'Failed to toggle VIP status' });
   }
 });
 

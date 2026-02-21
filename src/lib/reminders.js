@@ -103,6 +103,39 @@ function toMySQLDateTime(date) {
   return d.toISOString().slice(0, 19).replace('T', ' ');
 }
 
+async function insertReminderIfNotExists(tenantId, appointmentId, sendAt, method = 'email') {
+  if (!sendAt) return false;
+
+  const sendDate = new Date(sendAt);
+  if (Number.isNaN(sendDate.getTime())) return false;
+
+  // Do not schedule reminders in the past to avoid immediate multi-send bursts
+  if (sendDate <= new Date()) return false;
+
+  const sendAtMySQL = toMySQLDateTime(sendDate);
+  const existing = await query(
+    `SELECT id FROM appointment_reminders
+     WHERE tenant_id = ? AND appointment_id = ?
+     AND reminder_type = 'appointment_upcoming'
+     AND method = ?
+     AND send_at = ?
+     AND status = 'pending'
+     LIMIT 1`,
+    [tenantId, appointmentId, method, sendAtMySQL]
+  );
+
+  if (existing.length > 0) return false;
+
+  await execute(
+    `INSERT INTO appointment_reminders
+     (tenant_id, appointment_id, reminder_type, send_at, method, status)
+     VALUES (?, ?, 'appointment_upcoming', ?, ?, 'pending')`,
+    [tenantId, appointmentId, sendAtMySQL, method]
+  );
+
+  return true;
+}
+
 /**
  * Schedule reminders for an appointment
  * Creates reminder records based on tenant's reminder settings
@@ -126,12 +159,7 @@ export async function scheduleAppointmentReminders(tenantId, appointmentId, appo
       const fallbackTimings = ['24h', '2h', '30m'];
       for (const timing of fallbackTimings) {
         const sendAt = calculateSendAt(appointmentStart, timing);
-        await execute(
-          `INSERT INTO appointment_reminders
-           (tenant_id, appointment_id, reminder_type, send_at, method, status)
-           VALUES (?, ?, 'appointment_upcoming', ?, 'email', 'pending')`,
-          [tenantId, appointmentId, toMySQLDateTime(sendAt)]
-        );
+        await insertReminderIfNotExists(tenantId, appointmentId, sendAt, 'email');
       }
       return;
     }
@@ -159,12 +187,7 @@ export async function scheduleAppointmentReminders(tenantId, appointmentId, appo
           continue;
         }
 
-        await execute(
-          `INSERT INTO appointment_reminders
-           (tenant_id, appointment_id, reminder_type, send_at, method, status)
-           VALUES (?, ?, 'appointment_upcoming', ?, ?, 'pending')`,
-          [tenantId, appointmentId, toMySQLDateTime(sendAt), channel]
-        );
+        await insertReminderIfNotExists(tenantId, appointmentId, sendAt, channel);
       }
     }
     
@@ -261,7 +284,7 @@ async function sendReminder(reminder) {
     if (appointment.status === 'cancelled' || appointment.status === 'completed' || appointment.status === 'no_show') {
       // Mark reminder as cancelled
       await execute(
-        `UPDATE appointment_reminders SET status = 'sent', error_message = 'Appointment cancelled or completed' 
+        `UPDATE appointment_reminders SET status = 'sent', sent_at = NOW(), next_retry_at = NULL, error_message = 'Appointment cancelled or completed' 
          WHERE id = ?`,
         [reminder.id]
       );
@@ -345,7 +368,7 @@ async function sendReminder(reminder) {
       if (result.success) {
         await execute(
           `UPDATE appointment_reminders 
-           SET status = 'sent', sent_at = NOW(), error_message = NULL 
+           SET status = 'sent', sent_at = NOW(), next_retry_at = NULL, error_message = NULL 
            WHERE id = ?`,
           [reminder.id]
         );
@@ -359,7 +382,7 @@ async function sendReminder(reminder) {
     } else if (reminder.method === 'sms') {
       await execute(
         `UPDATE appointment_reminders
-         SET status = 'sent', sent_at = NOW(), error_message = 'SMS disabled'
+         SET status = 'sent', sent_at = NOW(), next_retry_at = NULL, error_message = 'SMS disabled'
          WHERE id = ?`,
         [reminder.id]
       );
@@ -404,6 +427,20 @@ export async function processPendingReminders() {
     let failed = 0;
     
     for (const reminder of reminders) {
+      // Lightweight optimistic lock to prevent duplicate sends when multiple workers run
+      const claim = await execute(
+        `UPDATE appointment_reminders
+         SET next_retry_at = DATE_ADD(NOW(), INTERVAL 2 MINUTE)
+         WHERE id = ?
+         AND status = 'pending'
+         AND (next_retry_at IS NULL OR next_retry_at <= NOW())`,
+        [reminder.id]
+      );
+
+      if (!claim?.affectedRows) {
+        continue;
+      }
+
       const result = await sendReminder(reminder);
       if (result.success && !result.skipped) {
         sent++;
@@ -434,6 +471,21 @@ export async function cancelAppointmentReminders(appointmentId) {
     );
   } catch (error) {
     console.error('Error cancelling reminders:', error);
+  }
+}
+
+export async function cancelRemindersForAppointments(appointmentIds = []) {
+  try {
+    if (!Array.isArray(appointmentIds) || appointmentIds.length === 0) return;
+    const placeholders = appointmentIds.map(() => '?').join(',');
+    await execute(
+      `UPDATE appointment_reminders
+       SET status = 'sent', sent_at = NOW(), next_retry_at = NULL, error_message = 'Appointment updated'
+       WHERE appointment_id IN (${placeholders}) AND status = 'pending'`,
+      appointmentIds
+    );
+  } catch (error) {
+    console.error('Error cancelling reminders for appointments:', error);
   }
 }
 
@@ -470,5 +522,6 @@ export default {
   scheduleAppointmentReminders,
   processPendingReminders,
   cancelAppointmentReminders,
+  cancelRemindersForAppointments,
   rescheduleAppointmentReminders,
 };
