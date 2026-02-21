@@ -468,9 +468,9 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const tid = req.tenantId;
 
-    // Check for linked appointments
+    // Check for linked appointments (scheduled/confirmed/in_progress = active)
     const [linkedAppts] = await query(
-      'SELECT COUNT(*) as cnt FROM appointments WHERE customer_id = ? AND tenant_id = ? AND status IN (\'confirmed\',\'pending\')',
+      'SELECT COUNT(*) as cnt FROM appointments WHERE customer_id = ? AND tenant_id = ? AND status IN (\'confirmed\',\'scheduled\',\'in_progress\') AND start_time >= NOW()',
       [id, tid]
     );
     if (linkedAppts?.cnt > 0) {

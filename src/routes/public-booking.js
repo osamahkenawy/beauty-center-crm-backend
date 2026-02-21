@@ -1,6 +1,8 @@
 import express from 'express';
+import QRCode from 'qrcode';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { sendNotificationEmail } from '../lib/email.js';
 import crypto from 'crypto';
 
 const router = express.Router();
@@ -626,6 +628,55 @@ router.post('/:slug/book', async (req, res) => {
         manage_url: `/book/${req.params.slug}/manage/${token}`,
       }
     });
+
+    // Send confirmation email with QR code (async — does not block response)
+    if (customer_email) {
+      const appointmentDate = new Date(appointment.start_time);
+      const dateStr = appointmentDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      const timeStr = appointmentDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+      const manageLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/book/${req.params.slug}/manage/${token}`;
+
+      QRCode.toBuffer(`APPOINTMENT:${appointment.id}`, {
+        type: 'png', width: 200, margin: 2,
+        color: { dark: '#1a1a2e', light: '#ffffff' },
+      }).then(qrBuffer => sendNotificationEmail({
+        to: customer_email,
+        subject: status === 'confirmed'
+          ? `Booking Confirmed — ${appointment.service_name} on ${dateStr}`
+          : `Booking Received — ${appointment.service_name} on ${dateStr}`,
+        title: status === 'confirmed' ? `Your Booking is Confirmed! ✅` : `Booking Received ⏳`,
+        body: `
+          <p>Dear ${customer_name},</p>
+          ${status === 'confirmed'
+            ? `<p>Your appointment has been confirmed! Show the QR code below when you arrive — our staff will scan it to check you in instantly.</p>`
+            : `<p>Your booking request has been received and is awaiting confirmation. We'll notify you once it's confirmed.</p>`
+          }
+          <div style="background:#f8f9fa;padding:24px;border-radius:8px;margin:20px 0;text-align:center;">
+            <p style="margin:0 0 4px;font-size:18px;font-weight:600;color:#333;">${appointment.service_name}</p>
+            <p style="margin:0 0 16px;font-size:15px;color:#555;">${dateStr} &nbsp;·&nbsp; ${timeStr}</p>
+            ${status === 'confirmed' ? `
+            <img src="cid:appt_qr" alt="Check-in QR Code"
+              style="display:block;margin:0 auto 12px;width:160px;height:160px;border:4px solid #fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);" />
+            <p style="font-size:12px;color:#aaa;margin:0;">Show this at the counter to check in</p>` : ''}
+          </div>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;width:90px;">Service</td><td style="padding:6px 0;font-weight:500;">${appointment.service_name}</td></tr>
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;">Date</td><td style="padding:6px 0;font-weight:500;">${dateStr}</td></tr>
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;">Time</td><td style="padding:6px 0;font-weight:500;">${timeStr}</td></tr>
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;">Staff</td><td style="padding:6px 0;font-weight:500;">${appointment.staff_name || 'Our team'}</td></tr>
+            ${appointment.branch_name ? `<tr><td style="padding:6px 0;color:#888;font-size:13px;">Branch</td><td style="padding:6px 0;font-weight:500;">${appointment.branch_name}</td></tr>` : ''}
+          </table>
+          <p style="color:#555;">Need to reschedule or cancel? <a href="${manageLink}" style="color:#f2421b;">Manage your booking here</a>.</p>
+        `,
+        tenantId: tenant.id,
+        attachments: status === 'confirmed' ? [{
+          filename: 'appointment-qr.png',
+          content: qrBuffer,
+          cid: 'appt_qr',
+          contentType: 'image/png',
+        }] : undefined,
+      })).catch(err => console.error('Public booking email error:', err.message));
+    }
   } catch (error) {
     console.error('Public booking error:', error);
     res.status(500).json({ success: false, message: 'Server error', debug: error.message });

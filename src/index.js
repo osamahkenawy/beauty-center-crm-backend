@@ -62,6 +62,7 @@ import notificationsRoutes from './routes/notifications.js';
 import publicBookingRoutes from './routes/public-booking.js';
 import rolesRoutes from './routes/roles.js';
 import appConnectRoutes from './routes/app-connect.js';
+import barcodeRoutes from './routes/barcode.js';
 
 const app = express();
 
@@ -159,6 +160,7 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/roles', rolesRoutes);
 app.use('/api/booking-settings', publicBookingRoutes);
 app.use('/api/app-connect', appConnectRoutes);
+app.use('/api/barcodes', barcodeRoutes);
 
 // 404 handler
 app.use((req, res) => {

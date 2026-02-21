@@ -1,5 +1,6 @@
 import express from 'express';
 import crypto from 'crypto';
+import QRCode from 'qrcode';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { notifyGiftCard } from '../lib/notify.js';
@@ -178,24 +179,41 @@ router.post('/', async (req, res) => {
     // Send email if recipient email provided
     if (issued_to_email) {
       try {
+        // Generate QR code buffer — payload matches the barcode lookup format
+        const qrPayload = `GIFTCARD:${code}`;
+        const qrBuffer = await QRCode.toBuffer(qrPayload, {
+          type: 'png',
+          width: 200,
+          margin: 2,
+          color: { dark: '#1a1a2e', light: '#ffffff' },
+        });
+
         await sendNotificationEmail({
           to: issued_to_email,
-          subject: `🎁 Gift Card from ${currency} ${initial_value.toFixed(2)}`,
+          subject: `🎁 Your Gift Card — ${currency} ${initial_value.toFixed(2)}`,
           title: `You've Received a Gift Card! 🎁`,
           body: `
             <p>Dear ${issued_to_name || 'Valued Customer'},</p>
-            <p>You've received a gift card!</p>
-            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
-              <h2 style="color: ${card_color}; margin: 0 0 10px 0;">${currency} ${initial_value.toFixed(2)}</h2>
-              <p style="margin: 10px 0;"><strong>Gift Card Code:</strong></p>
-              <p style="font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #333; margin: 10px 0;">${code}</p>
-              ${expiresStr ? `<p style="margin: 10px 0; color: #666;">Valid until: ${new Date(expiresStr).toLocaleDateString()}</p>` : ''}
+            <p>You've received a gift card! Scan the QR code below at checkout or enter the code manually.</p>
+            <div style="background: #f8f9fa; padding: 24px; border-radius: 8px; margin: 20px 0; text-align: center;">
+              <h2 style="color: ${card_color}; margin: 0 0 8px 0;">${currency} ${initial_value.toFixed(2)}</h2>
+              ${expiresStr ? `<p style="margin: 0 0 16px 0; color: #666; font-size: 14px;">Valid until: ${new Date(expiresStr).toLocaleDateString()}</p>` : '<div style="margin-bottom:16px"></div>'}
+              <img src="cid:giftcard_qr" alt="Gift Card QR Code"
+                style="display:block; margin: 0 auto 16px; width:160px; height:160px; border:4px solid #fff; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,.12);" />
+              <p style="margin: 8px 0 4px; font-size: 13px; color: #888;">Gift Card Code</p>
+              <p style="font-size: 22px; font-weight: bold; letter-spacing: 3px; color: #333; margin: 0; font-family: monospace;">${code}</p>
             </div>
-            ${message ? `<p style="font-style: italic; color: #666;">"${message}"</p>` : ''}
-            <p>You can use this gift card at checkout. Simply enter the code when making a payment.</p>
+            ${message ? `<p style="font-style: italic; color: #666; text-align:center;">"${message}"</p>` : ''}
+            <p style="color:#555;">Present this email at the counter — staff can scan the QR code or type in the code to apply your gift card balance.</p>
             <p>Thank you and enjoy!</p>
           `,
           tenantId: t,
+          attachments: [{
+            filename: 'giftcard-qr.png',
+            content: qrBuffer,
+            cid: 'giftcard_qr',   // referenced in <img src="cid:giftcard_qr">
+            contentType: 'image/png',
+          }],
         }).catch(err => console.error('Failed to send gift card email:', err.message));
       } catch (emailErr) {
         console.error('Error sending gift card email:', emailErr);
@@ -274,6 +292,60 @@ router.post('/:id/void', async (req, res) => {
 
     res.json({ success: true, message: 'Gift card voided' });
   } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── Resend gift card email (with QR code) ──
+router.post('/:id/resend-email', async (req, res) => {
+  try {
+    const [card] = await query('SELECT * FROM gift_cards WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
+    if (!card) return res.status(404).json({ success: false, message: 'Gift card not found' });
+
+    const toEmail = req.body.email || card.issued_to_email;
+    if (!toEmail) return res.status(400).json({ success: false, message: 'No recipient email on file. Provide an email in the request body.' });
+
+    const qrPayload = `GIFTCARD:${card.code}`;
+    const qrBuffer = await QRCode.toBuffer(qrPayload, {
+      type: 'png', width: 200, margin: 2,
+      color: { dark: '#1a1a2e', light: '#ffffff' },
+    });
+
+    const expiresStr = card.expires_at;
+    const cardColor = card.card_color || '#f2421b';
+    const currency = card.currency || 'AED';
+
+    await sendNotificationEmail({
+      to: toEmail,
+      subject: `🎁 Your Gift Card — ${currency} ${parseFloat(card.remaining_value).toFixed(2)} remaining`,
+      title: `Your Gift Card 🎁`,
+      body: `
+        <p>Dear ${card.issued_to_name || 'Valued Customer'},</p>
+        <p>Here is your gift card. Scan the QR code at checkout or enter the code manually.</p>
+        <div style="background: #f8f9fa; padding: 24px; border-radius: 8px; margin: 20px 0; text-align: center;">
+          <h2 style="color: ${cardColor}; margin: 0 0 4px 0;">${currency} ${parseFloat(card.remaining_value).toFixed(2)} remaining</h2>
+          <p style="margin: 0 0 16px; color: #888; font-size: 13px;">(Original value: ${currency} ${parseFloat(card.initial_value).toFixed(2)})</p>
+          ${expiresStr ? `<p style="margin: 0 0 16px 0; color: #666; font-size: 14px;">Valid until: ${new Date(expiresStr).toLocaleDateString()}</p>` : '<div style="margin-bottom:16px"></div>'}
+          <img src="cid:giftcard_qr" alt="Gift Card QR Code"
+            style="display:block; margin: 0 auto 16px; width:160px; height:160px; border:4px solid #fff; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,.12);" />
+          <p style="margin: 8px 0 4px; font-size: 13px; color: #888;">Gift Card Code</p>
+          <p style="font-size: 22px; font-weight: bold; letter-spacing: 3px; color: #333; margin: 0; font-family: monospace;">${card.code}</p>
+        </div>
+        ${card.message ? `<p style="font-style: italic; color: #666; text-align:center;">"${card.message}"</p>` : ''}
+        <p style="color:#555;">Present this email at the counter — staff can scan the QR code or type in the code to apply your balance.</p>
+      `,
+      tenantId: req.tenantId,
+      attachments: [{
+        filename: 'giftcard-qr.png',
+        content: qrBuffer,
+        cid: 'giftcard_qr',
+        contentType: 'image/png',
+      }],
+    });
+
+    res.json({ success: true, message: `Gift card email sent to ${toEmail}` });
+  } catch (error) {
+    console.error('Resend gift card email error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

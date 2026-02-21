@@ -1,4 +1,5 @@
 import express from 'express';
+import QRCode from 'qrcode';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { redeemGiftCard } from './gift-cards.js';
@@ -199,23 +200,42 @@ router.post('/', async (req, res) => {
             hour12: true 
           });
           
+          // Generate QR code for check-in (payload matches /api/barcodes/lookup)
+          const qrBuffer = await QRCode.toBuffer(`APPOINTMENT:${appointment.id}`, {
+            type: 'png', width: 200, margin: 2,
+            color: { dark: '#1a1a2e', light: '#ffffff' },
+          }).catch(() => null);
+
           const emailResult = await sendNotificationEmail({
             to: customer.email,
             subject: `Appointment Confirmed — ${appointment?.service_name || 'Service'} on ${dateStr}`,
             title: `Appointment Confirmed ✅`,
             body: `
               <p>Dear ${customerName},</p>
-              <p>Your appointment has been confirmed!</p>
-              <ul>
-                <li><strong>Service:</strong> ${appointment?.service_name || 'Service'}</li>
-                <li><strong>Date:</strong> ${dateStr}</li>
-                <li><strong>Time:</strong> ${timeStr}</li>
-                <li><strong>Staff:</strong> ${appointment?.staff_name || 'Our team'}</li>
-              </ul>
-              <p>We look forward to seeing you!</p>
-              <p>If you need to reschedule or cancel, please contact us as soon as possible.</p>
+              <p>Your appointment has been confirmed! Show the QR code below when you arrive — our staff will scan it to check you in instantly.</p>
+              <div style="background:#f8f9fa;padding:24px;border-radius:8px;margin:20px 0;text-align:center;">
+                <p style="margin:0 0 6px;font-size:13px;color:#888;">Appointment #${appointment.id}</p>
+                <p style="margin:0 0 4px;font-size:18px;font-weight:600;color:#333;">${appointment?.service_name || 'Service'}</p>
+                <p style="margin:0 0 16px;font-size:15px;color:#555;">${dateStr} &nbsp;·&nbsp; ${timeStr}</p>
+                ${qrBuffer ? `<img src="cid:appt_qr" alt="Check-in QR Code"
+                  style="display:block;margin:0 auto 12px;width:160px;height:160px;border:4px solid #fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);" />
+                <p style="font-size:12px;color:#aaa;margin:0;">Scan at the counter to check in</p>` : ''}
+              </div>
+              <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+                <tr><td style="padding:6px 0;color:#888;font-size:13px;width:90px;">Service</td><td style="padding:6px 0;font-weight:500;">${appointment?.service_name || '—'}</td></tr>
+                <tr><td style="padding:6px 0;color:#888;font-size:13px;">Date</td><td style="padding:6px 0;font-weight:500;">${dateStr}</td></tr>
+                <tr><td style="padding:6px 0;color:#888;font-size:13px;">Time</td><td style="padding:6px 0;font-weight:500;">${timeStr}</td></tr>
+                <tr><td style="padding:6px 0;color:#888;font-size:13px;">Staff</td><td style="padding:6px 0;font-weight:500;">${appointment?.staff_name || 'Our team'}</td></tr>
+              </table>
+              <p style="color:#555;">If you need to reschedule or cancel, please contact us as soon as possible.</p>
             `,
             tenantId,
+            attachments: qrBuffer ? [{
+              filename: 'appointment-qr.png',
+              content: qrBuffer,
+              cid: 'appt_qr',
+              contentType: 'image/png',
+            }] : undefined,
           });
           
           if (emailResult.success) {
@@ -523,8 +543,9 @@ router.patch('/:id', async (req, res) => {
     const [appointment] = await query(
       `SELECT a.*, 
               c.first_name as customer_first_name, c.last_name as customer_last_name,
+              c.email as customer_email,
               s.full_name as staff_name,
-              p.name as service_name
+              p.name as service_name, p.unit_price
        FROM appointments a
        LEFT JOIN contacts c ON a.customer_id = c.id
        LEFT JOIN staff s ON a.staff_id = s.id
@@ -532,6 +553,112 @@ router.patch('/:id', async (req, res) => {
        WHERE a.id = ?`,
       [id]
     );
+
+    // When status flips to in_progress: auto-create draft invoice + send payment QR email
+    if (status === 'in_progress' && existing.status !== 'in_progress') {
+      (async () => {
+        try {
+          const apt = appointment;
+          if (!apt) return;
+
+          // Check if invoice already exists for this appointment
+          const [existingInv] = await query(
+            'SELECT id, invoice_number FROM invoices WHERE appointment_id = ? AND tenant_id = ?',
+            [id, tenantId]
+          );
+
+          let invoiceId, invoiceNumber;
+
+          if (existingInv) {
+            invoiceId = existingInv.id;
+            invoiceNumber = existingInv.invoice_number;
+          } else {
+            // Generate next invoice number
+            const [lastInv] = await query(
+              "SELECT invoice_number FROM invoices WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
+              [tenantId]
+            );
+            const lastNum = lastInv?.invoice_number ? parseInt(lastInv.invoice_number.replace('INV-', '')) || 0 : 0;
+            invoiceNumber = `INV-${String(lastNum + 1).padStart(4, '0')}`;
+
+            // Calculate totals
+            const basePrice   = parseFloat(apt.unit_price || 0);
+            const promoDisc   = parseFloat(apt.discount_amount || 0);
+            const afterDisc   = basePrice - promoDisc;
+            const taxRate     = 5;
+            const taxAmount   = afterDisc * (taxRate / 100);
+            const total       = afterDisc + taxAmount;
+
+            const invResult = await execute(`
+              INSERT INTO invoices
+                (tenant_id, appointment_id, customer_id, staff_id,
+                 invoice_number, subtotal, discount_amount, discount_type,
+                 tax_rate, tax_amount, total, amount_paid, currency,
+                 status, payment_method, notes, created_by)
+              VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?,?)
+            `, [
+              tenantId, id, apt.customer_id, apt.staff_id,
+              invoiceNumber, basePrice, promoDisc, apt.discount_type || 'fixed',
+              taxRate, taxAmount, total, 0, apt.currency || 'AED',
+              'sent', null, null, req.user?.id || null
+            ]);
+            invoiceId = invResult.insertId;
+
+            // Add service line item
+            await execute(`
+              INSERT INTO invoice_items
+                (invoice_id, item_type, item_id, name, quantity, unit_price, total)
+              VALUES (?, 'service', ?, ?, 1, ?, ?)
+            `, [invoiceId, apt.service_id, apt.service_name || 'Service',
+                parseFloat(apt.unit_price || 0), parseFloat(apt.unit_price || 0)]);
+          }
+
+          // Send payment QR email if customer has an email address
+          if (apt.customer_email) {
+            const customerName = `${apt.customer_first_name || ''} ${apt.customer_last_name || ''}`.trim() || 'Valued Client';
+
+            const qrBuffer = await QRCode.toBuffer(`INVOICE:${invoiceNumber}`, {
+              type: 'png', width: 200, margin: 2,
+              color: { dark: '#1a1a2e', light: '#ffffff' },
+            }).catch(() => null);
+
+            await sendNotificationEmail({
+              to: apt.customer_email,
+              subject: `Your Invoice is Ready — ${invoiceNumber}`,
+              title: `Your Invoice is Ready 💳`,
+              body: `
+                <p>Dear ${customerName},</p>
+                <p>Your session has started and your invoice is ready. Show the QR code below at the counter to complete your payment quickly.</p>
+                <div style="background:#f8f9fa;padding:24px;border-radius:8px;margin:20px 0;text-align:center;">
+                  <p style="margin:0 0 6px;font-size:13px;color:#888;">Invoice ${invoiceNumber}</p>
+                  <p style="margin:0 0 16px;font-size:18px;font-weight:600;color:#333;">${apt.service_name || 'Service'}</p>
+                  ${qrBuffer ? `<img src="cid:inv_qr" alt="Payment QR Code"
+                    style="display:block;margin:0 auto 12px;width:160px;height:160px;border:4px solid #fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);" />
+                  <p style="font-size:12px;color:#aaa;margin:0;">Show this QR at checkout to pay</p>` : ''}
+                </div>
+                <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+                  <tr><td style="padding:6px 0;color:#888;font-size:13px;width:90px;">Service</td><td style="padding:6px 0;font-weight:500;">${apt.service_name || '—'}</td></tr>
+                  <tr><td style="padding:6px 0;color:#888;font-size:13px;">Staff</td><td style="padding:6px 0;font-weight:500;">${apt.staff_name || 'Our team'}</td></tr>
+                  <tr><td style="padding:6px 0;color:#888;font-size:13px;">Invoice #</td><td style="padding:6px 0;font-weight:500;">${invoiceNumber}</td></tr>
+                </table>
+                <p style="color:#555;">Thank you for choosing us today!</p>
+              `,
+              tenantId,
+              attachments: qrBuffer ? [{
+                filename: 'invoice-qr.png',
+                content: qrBuffer,
+                cid: 'inv_qr',
+                contentType: 'image/png',
+              }] : undefined,
+            }).catch(e => console.warn('Could not send payment QR email:', e.message));
+
+            console.log(`✅ Payment QR email sent to ${apt.customer_email} for invoice ${invoiceNumber}`);
+          }
+        } catch (inProgressErr) {
+          console.error('Error in in_progress invoice/email handler:', inProgressErr);
+        }
+      })();
+    }
 
     res.json({ success: true, data: appointment, message: 'Appointment updated successfully' });
   } catch (error) {
