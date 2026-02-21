@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { query, execute } from '../lib/database.js';
 import { generateToken, authMiddleware } from '../middleware/auth.js';
-import { sendEmail } from '../lib/email.js';
+import { sendEmail, buildEmailTemplate, getTenantBranding } from '../lib/email.js';
 import { config } from '../config.js';
 
 const router = express.Router();
@@ -342,50 +342,31 @@ router.post('/forgot-password', async (req, res) => {
     const resetUrl = `${config.frontendUrl}/reset-password?token=${token}`;
     const firstName = user.full_name?.split(' ')[0] || 'there';
 
-    const html = `
-      <div style="max-width:520px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;">
-        <div style="background:linear-gradient(135deg,#1c2430 0%,#2d3f55 100%);padding:36px;text-align:center;border-radius:16px 16px 0 0;">
-          <img src="https://trasealla.com/logo.png" alt="Trasealla" style="height:38px;margin-bottom:16px;" onerror="this.style.display='none'"/>
-          <h1 style="color:#fff;margin:0;font-size:22px;font-weight:700;">Reset Your Password</h1>
-          <p style="color:rgba(255,255,255,0.6);margin:8px 0 0;font-size:14px;">You requested a password reset</p>
-        </div>
-        <div style="background:#fff;padding:36px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 16px 16px;">
-          <p style="color:#374151;font-size:15px;line-height:1.6;margin:0 0 16px;">Hi <strong>${firstName}</strong>,</p>
-          <p style="color:#6b7280;font-size:14px;line-height:1.7;margin:0 0 28px;">
-            We received a request to reset your password for your Trasealla CRM account.
-            Click the button below to choose a new password.
-          </p>
-          <div style="text-align:center;margin:0 0 28px;">
-            <a href="${resetUrl}"
-               style="display:inline-block;background:linear-gradient(135deg,#f2421b,#e63715);
-                      color:#fff;padding:14px 36px;border-radius:10px;text-decoration:none;
-                      font-weight:700;font-size:15px;letter-spacing:0.02em;
-                      box-shadow:0 4px 14px rgba(242,66,27,0.35);">
-              Reset Password
-            </a>
-          </div>
-          <div style="background:#f8fafc;border-radius:10px;padding:14px 18px;margin:0 0 24px;">
-            <p style="color:#94a3b8;font-size:12px;margin:0 0 6px;">Or copy this link:</p>
-            <p style="color:#475569;font-size:12px;word-break:break-all;margin:0;font-family:monospace;">${resetUrl}</p>
-          </div>
-          <p style="color:#9ca3af;font-size:12px;line-height:1.6;margin:0 0 8px;">
-            ⏱ This link expires in <strong>1 hour</strong>.
-          </p>
-          <p style="color:#9ca3af;font-size:12px;margin:0;">
-            If you didn't request this, you can safely ignore this email.
-            Your password will not change.
-          </p>
-          <hr style="border:none;border-top:1px solid #f1f5f9;margin:24px 0;" />
-          <p style="color:#cbd5e1;font-size:11px;text-align:center;margin:0;">
-            Trasealla CRM · <a href="https://trasealla.com" style="color:#f2421b;text-decoration:none;">trasealla.com</a>
-          </p>
-        </div>
-      </div>
-    `;
+    const html = buildEmailTemplate({
+      logoUrl: `${config.frontendUrl}/assets/images/logos/trasealla-solutions-logo.png`,
+      logoAlt: 'Trasealla Solutions',
+      accentColor: '#1c2f4e',
+      title: 'Reset Your Password',
+      subtitle: 'Trasealla Solutions — Account Security',
+      bodyHtml: `
+        <p style="margin:0 0 12px;font-size:15px;color:#374151;line-height:1.6;">
+          Hi <strong style="color:#111827;">${firstName}</strong>,
+        </p>
+        <p style="margin:0 0 8px;color:#6b7280;line-height:1.75;">
+          We received a request to reset your password for your Trasealla Solutions CRM account.
+          Click the button below to choose a new password.
+        </p>`,
+      ctaText: 'Reset My Password',
+      ctaUrl: resetUrl,
+      copyLink: resetUrl,
+      expiryNote: '1 hour',
+      footerName: 'Trasealla Solutions',
+      isSystem: true,
+    });
 
     const emailResult = await sendEmail({
       to: user.email,
-      subject: 'Reset your Trasealla CRM password',
+      subject: 'Reset your Trasealla Solutions password',
       html,
     });
 
@@ -555,22 +536,22 @@ router.post('/test-email', authMiddleware, async (req, res) => {
     const result = await sendEmail({
       to,
       subject: '✅ Trasealla CRM — Email Test',
-      html: `
-        <div style="max-width:480px;margin:0 auto;font-family:Arial,sans-serif;">
-          <div style="background:#1c2430;padding:24px;border-radius:12px 12px 0 0;text-align:center;">
-            <h2 style="color:#fff;margin:0;">Email Test Successful 🎉</h2>
-          </div>
-          <div style="background:#fff;padding:24px;border:1px solid #eee;border-radius:0 0 12px 12px;">
-            <p>This is a test email from <strong>Trasealla CRM</strong>.</p>
-            <p>If you received this, your SMTP configuration is working correctly.</p>
-            <hr style="border:none;border-top:1px solid #f0f0f0;margin:16px 0;"/>
-            <p style="color:#aaa;font-size:12px;text-align:center;">
-              Sent from: ${config.smtp.from || config.smtp.user}<br/>
-              Via: ${config.smtp.host}:${config.smtp.port}
-            </p>
-          </div>
-        </div>
-      `,
+      html: buildEmailTemplate({
+        logoUrl: `${config.frontendUrl}/assets/images/logos/trasealla-solutions-logo.png`,
+        logoAlt: 'Trasealla Solutions',
+        accentColor: '#1c2f4e',
+        title: 'Email Test Successful',
+        subtitle: 'Your SMTP configuration is working correctly',
+        bodyHtml: `
+          <p style="margin:0 0 12px;color:#374151;">This is a test email from <strong>Trasealla Solutions CRM</strong>.</p>
+          <p style="margin:0 0 8px;color:#6b7280;">If you received this, your SMTP configuration is working correctly.</p>
+          <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;">
+            Sent from: ${config.smtp.from || config.smtp.user}<br/>
+            Via: ${config.smtp.host}:${config.smtp.port}
+          </p>`,
+        footerName: 'Trasealla Solutions',
+        isSystem: true,
+      }),
     });
 
     res.json({

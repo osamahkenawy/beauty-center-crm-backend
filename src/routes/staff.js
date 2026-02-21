@@ -150,22 +150,24 @@ router.post('/set-password', async (req, res) => {
 router.post('/test-email', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { to } = req.body;
-    const { sendEmail } = await import('../lib/email.js');
+    const { sendEmail, buildEmailTemplate, getTenantBranding } = await import('../lib/email.js');
+    const branding = await getTenantBranding(req.tenantId);
     const result = await sendEmail({
       to: to || req.user.email,
       subject: 'Test Email from Trasealla CRM',
-      html: `
-        <div style="max-width:500px;margin:0 auto;font-family:Arial,sans-serif;">
-          <div style="background:#f2421b;padding:24px;text-align:center;border-radius:12px 12px 0 0;">
-            <h1 style="color:#fff;margin:0;font-size:22px;">✅ Email Working!</h1>
-          </div>
-          <div style="background:#fff;padding:24px;border:1px solid #eee;border-top:none;border-radius:0 0 12px 12px;">
-            <p style="color:#333;font-size:16px;">This is a test email from your CRM system.</p>
-            <p style="color:#555;font-size:14px;">If you received this, email sending is configured correctly.</p>
-            <p style="color:#aaa;font-size:12px;">Sent at: ${new Date().toISOString()}</p>
-          </div>
-        </div>
-      `,
+      html: buildEmailTemplate({
+        logoUrl: branding.logoUrl,
+        logoAlt: branding.name,
+        accentColor: '#1c2f4e',
+        title: 'Email Working!',
+        subtitle: 'Your CRM email configuration is active',
+        bodyHtml: `
+          <p style="margin:0 0 12px;color:#374151;">This is a test email from your CRM system.</p>
+          <p style="margin:0 0 8px;color:#6b7280;">If you received this, email sending is configured correctly.</p>
+          <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;">Sent at: ${new Date().toISOString()}</p>`,
+        footerName: branding.name,
+        isSystem: branding.isSystem,
+      }),
       tenantId: req.tenantId,
     });
 

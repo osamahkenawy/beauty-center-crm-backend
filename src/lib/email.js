@@ -78,25 +78,173 @@ function getTransporter() {
 async function getFromName(tenantId) {
   if (tenantId) {
     try {
-      const rows = await query(
-        'SELECT name, settings FROM tenants WHERE id = ?',
-        [tenantId]
-      );
+      const rows = await query('SELECT name, settings FROM tenants WHERE id = ?', [tenantId]);
       if (rows.length > 0) {
-        // Check if tenant has a custom business name in settings
         let settings = {};
         try {
           settings = rows[0].settings
             ? (typeof rows[0].settings === 'string' ? JSON.parse(rows[0].settings) : rows[0].settings)
             : {};
         } catch (e) { /* ignore */ }
-
         if (settings.company_name) return settings.company_name;
         if (rows[0].name) return rows[0].name;
       }
     } catch (e) { /* ignore, use fallback */ }
   }
   return config.smtp.fromName || 'Trasealla Solutions';
+}
+
+/**
+ * Get tenant branding (name + logo URL).
+ * For system emails (no tenantId), returns Trasealla Solutions branding.
+ */
+async function getTenantBranding(tenantId) {
+  const systemLogoUrl = `${config.frontendUrl}/assets/images/logos/trasealla-solutions-logo.png`;
+  if (tenantId) {
+    try {
+      const rows = await query('SELECT name, logo_url, settings FROM tenants WHERE id = ?', [tenantId]);
+      if (rows.length > 0) {
+        let settings = {};
+        try {
+          settings = rows[0].settings
+            ? (typeof rows[0].settings === 'string' ? JSON.parse(rows[0].settings) : rows[0].settings)
+            : {};
+        } catch (e) { /* ignore */ }
+        const name = settings.company_name || rows[0].name || 'Trasealla Solutions';
+        const logoUrl = rows[0].logo_url || systemLogoUrl;
+        return { name, logoUrl, isSystem: false };
+      }
+    } catch (e) { /* ignore */ }
+  }
+  return { name: 'Trasealla Solutions', logoUrl: systemLogoUrl, isSystem: true };
+}
+
+/**
+ * Build a branded HTML email.
+ *
+ * @param {Object} opts
+ * @param {string}  opts.logoUrl      – URL of the logo image
+ * @param {string}  opts.logoAlt      – Alt text for logo
+ * @param {string}  opts.accentColor  – Top accent bar color (default: #f2421b)
+ * @param {string}  opts.title        – Card heading
+ * @param {string}  opts.subtitle     – Small subtitle under heading (optional)
+ * @param {string}  opts.bodyHtml     – Main body HTML (injected as-is)
+ * @param {string}  opts.ctaText      – CTA button label (optional)
+ * @param {string}  opts.ctaUrl       – CTA button link (optional)
+ * @param {string}  opts.copyLink     – "Or copy this link" value (optional)
+ * @param {string}  opts.expiryNote   – Expiry note text e.g. "1 hour" (optional)
+ * @param {string}  opts.footerName   – Name shown in footer
+ * @param {boolean} opts.isSystem     – If true, footer says "Trasealla Solutions"; else "footerName · Powered by Trasealla"
+ */
+function buildEmailTemplate({
+  logoUrl, logoAlt = 'Logo', accentColor = '#1c2f4e',
+  title, subtitle, bodyHtml,
+  ctaText, ctaUrl, copyLink, expiryNote,
+  footerName = 'Trasealla Solutions', isSystem = true,
+}) {
+  const logoBlock = `
+    <table cellpadding="0" cellspacing="0" style="display:inline-table;">
+      <tr>
+        <td style="background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;
+                   box-shadow:0 2px 12px rgba(0,0,0,0.08);padding:14px 28px;text-align:center;">
+          <img src="${logoUrl}" alt="${logoAlt}" height="44"
+               style="display:block;height:44px;width:auto;max-width:220px;" />
+        </td>
+      </tr>
+    </table>`;
+
+  const ctaBlock = ctaText && ctaUrl ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 32px;">
+      <tr>
+        <td align="center">
+          <a href="${ctaUrl}"
+             style="display:inline-block;background-color:${accentColor};color:#ffffff !important;
+                    text-decoration:none;padding:15px 44px;border-radius:10px;
+                    font-size:15px;font-weight:700;letter-spacing:0.02em;
+                    font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+            &#8594;&nbsp; ${ctaText}
+          </a>
+        </td>
+      </tr>
+    </table>` : '';
+
+  const copyLinkBlock = copyLink ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+      <tr>
+        <td style="background:#f8fafc;border:1px solid #e9edf2;border-radius:10px;padding:14px 18px;">
+          <p style="margin:0 0 6px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;">Or copy this link</p>
+          <p style="margin:0;font-size:12px;color:#475569;word-break:break-all;font-family:'Courier New',monospace;line-height:1.6;">${copyLink}</p>
+        </td>
+      </tr>
+    </table>` : '';
+
+  const expiryBlock = expiryNote ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+      <tr>
+        <td style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;">
+          <p style="margin:0;font-size:13px;color:#92400e;">
+            &#9203; This link expires in <strong>${expiryNote}</strong>.
+          </p>
+        </td>
+      </tr>
+    </table>` : '';
+
+  const footerHtml = isSystem
+    ? `Trasealla Solutions &nbsp;&bull;&nbsp; <a href="https://trasealla.com" style="color:#f2421b;text-decoration:none;font-weight:500;">trasealla.com</a>`
+    : `${footerName} &nbsp;&bull;&nbsp; Powered by <a href="https://trasealla.com" style="color:#f2421b;text-decoration:none;font-weight:500;">Trasealla</a>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:40px 16px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;">
+
+        <!-- Logo -->
+        <tr><td align="center" style="padding:0 0 28px;">${logoBlock}</td></tr>
+
+        <!-- Card -->
+        <tr>
+          <td style="background:#ffffff;border-radius:16px;border:1px solid #e2e8f0;
+                     box-shadow:0 4px 24px rgba(0,0,0,0.06);overflow:hidden;">
+
+            <!-- Top accent bar -->
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr><td style="background-color:${accentColor};height:4px;font-size:0;line-height:0;">&nbsp;</td></tr>
+            </table>
+
+            <!-- Body -->
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="padding:40px 40px 32px;">
+                  <h1 style="margin:0 0 ${subtitle ? '8' : '28'}px;font-size:22px;font-weight:700;color:#111827;">${title}</h1>
+                  ${subtitle ? `<p style="margin:0 0 28px;font-size:14px;color:#6b7280;">${subtitle}</p>` : ''}
+                  <div style="font-size:14px;color:#6b7280;line-height:1.75;">${bodyHtml}</div>
+                  ${ctaBlock}
+                  ${copyLinkBlock}
+                  ${expiryBlock}
+                </td>
+              </tr>
+            </table>
+
+            <!-- Footer -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #f1f5f9;">
+              <tr>
+                <td style="padding:20px 40px;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#9ca3af;">${footerHtml}</p>
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
 }
 
 /**
@@ -141,50 +289,33 @@ export async function sendEmail({ to, subject, html, text, tenantId, fromName, a
 
 /**
  * Send a staff invite email with a beautiful branded template.
- *
- * @param {Object} member       – { email, full_name, role }
- * @param {string} inviteToken  – Invite token
- * @param {number} tenantId     – Tenant ID for dynamic branding
- * @param {string} [tenantName] – Explicit override for tenant name
- * @returns {Promise<boolean|'dev'>}
  */
 export async function sendInviteEmail(member, inviteToken, tenantId, tenantName) {
-  const displayName = tenantName || await getFromName(tenantId);
+  const branding = await getTenantBranding(tenantId);
+  const displayName = tenantName || branding.name;
   const inviteUrl = `${config.frontendUrl}/set-password?token=${inviteToken}`;
 
-  const html = `
-    <div style="max-width:520px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;">
-      <div style="background:#f2421b;padding:30px;text-align:center;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;margin:0;font-size:24px;">Welcome to the Team! 🎉</h1>
-      </div>
-      <div style="background:#fff;padding:30px;border:1px solid #eee;border-top:none;border-radius:0 0 12px 12px;">
-        <p style="color:#333;font-size:16px;">Hi <strong>${member.full_name || 'there'}</strong>,</p>
-        <p style="color:#555;font-size:14px;line-height:1.6;">
-          You've been invited to join <strong>${displayName}</strong> as a
-          <strong style="color:#f2421b;">${member.role || 'team member'}</strong>.
-        </p>
-        <p style="color:#555;font-size:14px;line-height:1.6;">
-          Click the button below to set your password and activate your account:
-        </p>
-        <div style="text-align:center;margin:30px 0;">
-          <a href="${inviteUrl}"
-             style="background:#f2421b;color:#fff;padding:14px 36px;border-radius:8px;
-                    text-decoration:none;font-weight:bold;font-size:16px;display:inline-block;
-                    box-shadow:0 4px 12px rgba(242,66,27,0.3);">
-            Set Your Password
-          </a>
-        </div>
-        <p style="color:#aaa;font-size:12px;line-height:1.4;">
-          This link expires in <strong>7 days</strong>.
-          If you didn't expect this invite, please ignore this email.
-        </p>
-        <hr style="border:none;border-top:1px solid #f0f0f0;margin:24px 0;" />
-        <p style="color:#bbb;font-size:11px;text-align:center;">
-          Powered by <a href="https://trasealla.com" style="color:#f2421b;text-decoration:none;">Trasealla</a>
-        </p>
-      </div>
-    </div>
-  `;
+  const html = buildEmailTemplate({
+    logoUrl: branding.logoUrl,
+    logoAlt: displayName,
+    accentColor: '#1c2f4e',
+    title: 'Welcome to the Team!',
+    subtitle: `You have been invited to join ${displayName}`,
+    bodyHtml: `
+      <p style="margin:0 0 12px;font-size:15px;color:#374151;line-height:1.6;">
+        Hi <strong style="color:#111827;">${member.full_name || 'there'}</strong>,
+      </p>
+      <p style="margin:0 0 32px;color:#6b7280;line-height:1.75;">
+        You have been invited to join <strong style="color:#111827;">${displayName}</strong> as a
+        <strong style="color:#1c2f4e;">${member.role || 'team member'}</strong>.
+        Click the button below to set your password and activate your account.
+      </p>`,
+    ctaText: 'Set Your Password',
+    ctaUrl: inviteUrl,
+    expiryNote: '7 days',
+    footerName: displayName,
+    isSystem: branding.isSystem,
+  });
 
   const result = await sendEmail({
     to: member.email,
@@ -195,13 +326,10 @@ export async function sendInviteEmail(member, inviteToken, tenantId, tenantName)
   });
 
   if (result.success) return true;
-
-  // If email is not configured, log the link for development
   if (result.error === 'Email not configured (no SMTP credentials)') {
     console.log(`\n📧 INVITE EMAIL (dev mode):\n   To: ${member.email}\n   Link: ${inviteUrl}\n`);
     return 'dev';
   }
-
   return false;
 }
 
@@ -209,33 +337,22 @@ export async function sendInviteEmail(member, inviteToken, tenantId, tenantName)
  * Send a generic notification email (appointment confirmations, reminders, etc.)
  */
 export async function sendNotificationEmail({ to, subject, title, body, ctaText, ctaUrl, tenantId, attachments }) {
-  const displayName = await getFromName(tenantId);
+  const branding = await getTenantBranding(tenantId);
 
-  const html = `
-    <div style="max-width:520px;margin:0 auto;font-family:'Segoe UI',Arial,sans-serif;">
-      <div style="background:#f2421b;padding:24px;text-align:center;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;margin:0;font-size:22px;">${title || subject}</h1>
-      </div>
-      <div style="background:#fff;padding:28px;border:1px solid #eee;border-top:none;border-radius:0 0 12px 12px;">
-        <div style="color:#555;font-size:14px;line-height:1.7;">${body}</div>
-        ${ctaText && ctaUrl ? `
-          <div style="text-align:center;margin:28px 0;">
-            <a href="${ctaUrl}"
-               style="background:#f2421b;color:#fff;padding:12px 28px;border-radius:8px;
-                      text-decoration:none;font-weight:bold;font-size:15px;display:inline-block;">
-              ${ctaText}
-            </a>
-          </div>
-        ` : ''}
-        <hr style="border:none;border-top:1px solid #f0f0f0;margin:24px 0;" />
-        <p style="color:#bbb;font-size:11px;text-align:center;">
-          ${displayName} · Powered by <a href="https://trasealla.com" style="color:#f2421b;text-decoration:none;">Trasealla</a>
-        </p>
-      </div>
-    </div>
-  `;
+  const html = buildEmailTemplate({
+    logoUrl: branding.logoUrl,
+    logoAlt: branding.name,
+    accentColor: '#1c2f4e',
+    title: title || subject,
+    bodyHtml: `<div style="color:#6b7280;line-height:1.75;">${body}</div>`,
+    ctaText,
+    ctaUrl,
+    footerName: branding.name,
+    isSystem: branding.isSystem,
+  });
 
-  return sendEmail({ to, subject, html, tenantId, fromName: displayName, attachments });
+  return sendEmail({ to, subject, html, tenantId, fromName: branding.name, attachments });
 }
 
-export default { sendEmail, sendInviteEmail, sendNotificationEmail };
+export { buildEmailTemplate, getTenantBranding };
+export default { sendEmail, sendInviteEmail, sendNotificationEmail, buildEmailTemplate, getTenantBranding };

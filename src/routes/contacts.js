@@ -337,7 +337,7 @@ router.post('/', authMiddleware, async (req, res) => {
       try {
         await sendNotificationEmail({
           to: email,
-          subject: `Welcome to ${first_name}! 👋`,
+          subject: `Welcome, ${first_name}! We're glad you're here`,
           title: `Welcome! We're Excited to Have You`,
           body: `
             <p>Dear ${first_name}${last_name ? ` ${last_name}` : ''},</p>
