@@ -1,7 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import { query, execute } from '../lib/database.js';
-import { authMiddleware, platformOwnerOnly, tenantOwnerOnly, generateToken } from '../middleware/auth.js';
+import { authMiddleware, platformOwnerOnly, tenantOwnerOnly, adminOnly, generateToken } from '../middleware/auth.js';
 import crypto from 'crypto';
 
 const router = express.Router();
@@ -234,6 +234,68 @@ router.patch('/current', authMiddleware, tenantOwnerOnly, async (req, res) => {
   } catch (error) {
     console.error('Update tenant error:', error);
     res.status(500).json({ success: false, message: 'Failed to update tenant' });
+  }
+});
+
+/**
+ * Reset current tenant data (development/testing helper)
+ * Keeps tenant record + subscription + current user account.
+ */
+router.post('/current/reset-data', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    if (!req.tenantId) {
+      return res.status(400).json({ success: false, message: 'No tenant context' });
+    }
+
+    const { confirm } = req.body || {};
+    if (confirm !== 'RESET') {
+      return res.status(400).json({
+        success: false,
+        message: 'Confirmation required. Send {"confirm":"RESET"} to proceed.'
+      });
+    }
+
+    const excludedTables = ['tenants', 'subscriptions', 'staff', 'roles'];
+
+    const tenantTables = await query(
+      `SELECT DISTINCT c.table_name
+       FROM information_schema.columns c
+       WHERE c.table_schema = DATABASE()
+         AND c.column_name = 'tenant_id'
+         AND c.table_name NOT IN (${excludedTables.map(() => '?').join(', ')})`,
+      excludedTables
+    );
+
+    const summary = [];
+
+    for (const row of tenantTables) {
+      const tableName = row.table_name || row.TABLE_NAME;
+      if (!tableName) continue;
+      const result = await execute(`DELETE FROM \`${tableName}\` WHERE tenant_id = ?`, [req.tenantId]);
+      summary.push({ table: tableName, deleted: result.affectedRows || 0 });
+    }
+
+    const staffCleanup = await execute(
+      'DELETE FROM staff WHERE tenant_id = ? AND id != ? AND IFNULL(is_owner, 0) = 0',
+      [req.tenantId, req.user.id]
+    );
+    summary.push({ table: 'staff(non-owner)', deleted: staffCleanup.affectedRows || 0 });
+
+    const deletedRows = summary.reduce((acc, item) => acc + (item.deleted || 0), 0);
+
+    res.json({
+      success: true,
+      message: 'Tenant dummy data cleared successfully',
+      data: {
+        tenant_id: req.tenantId,
+        deleted_rows: deletedRows,
+        tables_processed: summary.length,
+        details: summary.filter(item => item.deleted > 0)
+      }
+    });
+  } catch (error) {
+    console.error('Reset tenant data error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reset tenant data', debug: error.message });
   }
 });
 

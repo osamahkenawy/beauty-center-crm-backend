@@ -5,7 +5,7 @@ import { processAutoEarn, redeemLoyaltyForPayment } from './loyalty.js';
 import { redeemGiftCard } from './gift-cards.js';
 import { notifyInvoice, notifyPayment } from '../lib/notify.js';
 import { sendNotificationEmail } from '../lib/email.js';
-import { generateInvoicePDF, getTenantInfo } from '../lib/pdf.js';
+import { generateInvoicePDF, generateReceiptPDF, getTenantInfo } from '../lib/pdf.js';
 
 const router = express.Router();
 
@@ -231,6 +231,42 @@ router.get('/:id/pdf', async (req, res) => {
   }
 });
 
+// ── Generate payment receipt PDF (must be before /:id route) ──
+router.get('/:id/receipt-pdf', async (req, res) => {
+  try {
+    await ensureTables();
+    const [invoice] = await query(`
+      SELECT i.*,
+        c.first_name as customer_first_name, c.last_name as customer_last_name,
+        c.email as customer_email, c.phone as customer_phone,
+        s.full_name as staff_name,
+        b.name as branch_name
+      FROM invoices i
+      LEFT JOIN contacts c ON i.customer_id = c.id
+      LEFT JOIN staff s ON i.staff_id = s.id
+      LEFT JOIN branches b ON i.branch_id = b.id
+      WHERE i.id = ? AND i.tenant_id = ?
+    `, [req.params.id, req.tenantId]);
+
+    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
+
+    const items = await query('SELECT * FROM invoice_items WHERE invoice_id = ?', [invoice.id]);
+    invoice.items = items;
+
+    const tenantInfo = await getTenantInfo(req.tenantId);
+    const receiptBuffer = await generateReceiptPDF(invoice, tenantInfo);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="receipt-${invoice.invoice_number}.pdf"`);
+    res.setHeader('Content-Length', receiptBuffer.length);
+
+    res.send(receiptBuffer);
+  } catch (error) {
+    console.error('Generate receipt PDF error:', error);
+    res.status(500).json({ success: false, message: 'Failed to generate receipt PDF', error: error.message });
+  }
+});
+
 // ── Get single invoice with items ──
 router.get('/:id', async (req, res) => {
   try {
@@ -352,6 +388,25 @@ router.post('/', async (req, res) => {
       try {
         const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [customer_id]);
         if (customer && customer.email) {
+          const [createdInvoice] = await query(`
+            SELECT i.*,
+              c.first_name as customer_first_name, c.last_name as customer_last_name,
+              c.email as customer_email, c.phone as customer_phone,
+              s.full_name as staff_name,
+              b.name as branch_name
+            FROM invoices i
+            LEFT JOIN contacts c ON i.customer_id = c.id
+            LEFT JOIN staff s ON i.staff_id = s.id
+            LEFT JOIN branches b ON i.branch_id = b.id
+            WHERE i.id = ? AND i.tenant_id = ?
+          `, [invoiceId, req.tenantId]);
+
+          const invoiceItems = await query('SELECT * FROM invoice_items WHERE invoice_id = ?', [invoiceId]);
+          createdInvoice.items = invoiceItems;
+
+          const tenantInfo = await getTenantInfo(req.tenantId);
+          const pdfBuffer = await generateInvoicePDF(createdInvoice, tenantInfo);
+
           const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Client';
           await sendNotificationEmail({
             to: customer.email,
@@ -369,6 +424,11 @@ router.post('/', async (req, res) => {
               <p>Thank you for your business!</p>
             `,
             tenantId: req.tenantId,
+            attachments: [{
+              filename: `invoice-${invoiceNumber}.pdf`,
+              content: pdfBuffer,
+              contentType: 'application/pdf',
+            }],
           }).catch(err => console.error('Failed to send invoice email:', err.message));
         }
       } catch (emailErr) {
@@ -670,6 +730,25 @@ router.post('/:id/pay', async (req, res) => {
       try {
         const [customer] = await query('SELECT email, first_name, last_name FROM contacts WHERE id = ?', [inv.customer_id]);
         if (customer && customer.email) {
+          const [invoiceWithMeta] = await query(`
+            SELECT i.*,
+              c.first_name as customer_first_name, c.last_name as customer_last_name,
+              c.email as customer_email, c.phone as customer_phone,
+              s.full_name as staff_name,
+              b.name as branch_name
+            FROM invoices i
+            LEFT JOIN contacts c ON i.customer_id = c.id
+            LEFT JOIN staff s ON i.staff_id = s.id
+            LEFT JOIN branches b ON i.branch_id = b.id
+            WHERE i.id = ? AND i.tenant_id = ?
+          `, [req.params.id, req.tenantId]);
+
+          const paidItems = await query('SELECT * FROM invoice_items WHERE invoice_id = ?', [req.params.id]);
+          invoiceWithMeta.items = paidItems;
+
+          const tenantInfo = await getTenantInfo(req.tenantId);
+          const receiptPdf = await generateReceiptPDF(invoiceWithMeta, tenantInfo);
+
           const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Valued Client';
           const paymentParts = [];
           if (loyaltyAmt > 0) paymentParts.push(`${loyaltyAmt} loyalty points`);
@@ -697,6 +776,11 @@ router.post('/:id/pay', async (req, res) => {
               <p>Thank you for your payment!</p>
             `,
             tenantId: req.tenantId,
+            attachments: [{
+              filename: `receipt-${inv.invoice_number}.pdf`,
+              content: receiptPdf,
+              contentType: 'application/pdf',
+            }],
           }).catch(err => console.error('Failed to send payment email:', err.message));
         }
       } catch (emailErr) {

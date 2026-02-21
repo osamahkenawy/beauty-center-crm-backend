@@ -111,7 +111,7 @@ async function getFromName(tenantId) {
  * @param {string} [opts.fromName]  – Override "From" display name
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
-export async function sendEmail({ to, subject, html, text, tenantId, fromName }) {
+export async function sendEmail({ to, subject, html, text, tenantId, fromName, attachments }) {
   const transport = getTransporter();
   if (!transport) {
     console.log(`📧 EMAIL (not configured — dev mode):\n   To: ${to}\n   Subject: ${subject}\n`);
@@ -128,6 +128,7 @@ export async function sendEmail({ to, subject, html, text, tenantId, fromName })
       subject,
       html,
       text: text || html.replace(/<[^>]*>/g, ''),   // strip HTML for plain text fallback
+      attachments: Array.isArray(attachments) ? attachments : undefined,
     });
 
     console.log(`✅ Email sent to ${to} (messageId: ${info.messageId})`);
@@ -207,7 +208,7 @@ export async function sendInviteEmail(member, inviteToken, tenantId, tenantName)
 /**
  * Send a generic notification email (appointment confirmations, reminders, etc.)
  */
-export async function sendNotificationEmail({ to, subject, title, body, ctaText, ctaUrl, tenantId }) {
+export async function sendNotificationEmail({ to, subject, title, body, ctaText, ctaUrl, tenantId, attachments }) {
   const displayName = await getFromName(tenantId);
 
   const html = `
@@ -234,7 +235,7 @@ export async function sendNotificationEmail({ to, subject, title, body, ctaText,
     </div>
   `;
 
-  return sendEmail({ to, subject, html, tenantId, fromName: displayName });
+  return sendEmail({ to, subject, html, tenantId, fromName: displayName, attachments });
 }
 
 export default { sendEmail, sendInviteEmail, sendNotificationEmail };

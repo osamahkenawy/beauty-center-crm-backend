@@ -1242,6 +1242,8 @@ async function ensureReminderColumns() {
     ['tenant_id', 'INT'],
     ['reminder_type', "VARCHAR(50) DEFAULT 'appointment_upcoming'"],
     ['retry_count', 'INT DEFAULT 0'],
+    ['next_retry_at', 'DATETIME DEFAULT NULL'],
+    ['last_error_at', 'DATETIME DEFAULT NULL'],
     ['error_message', 'TEXT'],
     ['created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'],
   ];

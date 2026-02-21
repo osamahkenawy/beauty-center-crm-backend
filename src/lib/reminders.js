@@ -1,6 +1,5 @@
 import { query, execute } from './database.js';
 import { sendEmail, sendNotificationEmail } from './email.js';
-// import { sendSMS, formatPhoneNumber } from './sms.js'; // SMS temporarily disabled
 import { notify } from './notify.js';
 
 /**
@@ -15,6 +14,8 @@ const REMINDER_TIMINGS = {
   '30m': 30 * 60 * 1000,       // 30 minutes
 };
 
+const RETRY_BACKOFF_MINUTES = [5, 15, 60];
+
 /**
  * Calculate send_at time for a reminder based on appointment start_time
  * @param {Date|string} appointmentStart - Appointment start time
@@ -23,8 +24,74 @@ const REMINDER_TIMINGS = {
  */
 function calculateSendAt(appointmentStart, timing) {
   const start = new Date(appointmentStart);
-  const ms = REMINDER_TIMINGS[timing] || REMINDER_TIMINGS['24h'];
+  let ms = REMINDER_TIMINGS[timing];
+
+  if (ms === undefined && typeof timing === 'number' && Number.isFinite(timing)) {
+    ms = timing * 60 * 60 * 1000;
+  }
+
+  if (ms === undefined && typeof timing === 'string') {
+    const hMatch = timing.match(/^(\d+(?:\.\d+)?)h$/i);
+    const mMatch = timing.match(/^(\d+(?:\.\d+)?)m$/i);
+    if (hMatch) ms = Number(hMatch[1]) * 60 * 60 * 1000;
+    if (mMatch) ms = Number(mMatch[1]) * 60 * 1000;
+  }
+
+  if (ms === undefined) ms = REMINDER_TIMINGS['24h'];
   return new Date(start.getTime() - ms);
+}
+
+function parseTimingOptions(setting) {
+  const defaultUpcomingTimings = [24, 2, 0.5];
+
+  try {
+    if (setting?.timing_options) {
+      const parsed = typeof setting.timing_options === 'string'
+        ? JSON.parse(setting.timing_options)
+        : setting.timing_options;
+
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed
+          .map(Number)
+          .filter(hours => Number.isFinite(hours) && hours >= 0)
+          .sort((a, b) => b - a);
+      }
+    }
+  } catch (error) {
+    // Ignore malformed timing_options and fallback
+  }
+
+  const hours = Number(setting?.hours_before);
+  if (Number.isFinite(hours) && hours >= 0) return [hours];
+
+  if (setting?.reminder_type === 'appointment_upcoming') {
+    return defaultUpcomingTimings;
+  }
+
+  return [24];
+}
+
+function getTimingLabelFromHours(hours) {
+  if (hours >= 1) return `${Math.round(hours)}h`;
+  const minutes = Math.round(hours * 60);
+  return `${minutes}m`;
+}
+
+function getNextRetryAt(retryCount) {
+  const minutes = RETRY_BACKOFF_MINUTES[Math.min(retryCount - 1, RETRY_BACKOFF_MINUTES.length - 1)];
+  return new Date(Date.now() + minutes * 60 * 1000);
+}
+
+async function markReminderFailed(reminderId, retryCount, errorMessage) {
+  const status = retryCount >= 3 ? 'failed' : 'pending';
+  const nextRetryAt = status === 'pending' ? getNextRetryAt(retryCount) : null;
+
+  await execute(
+    `UPDATE appointment_reminders
+     SET retry_count = ?, status = ?, next_retry_at = ?, last_error_at = NOW(), error_message = ?
+     WHERE id = ?`,
+    [retryCount, status, toMySQLDateTime(nextRetryAt), errorMessage || 'Unknown error', reminderId]
+  );
 }
 
 /**
@@ -55,14 +122,17 @@ export async function scheduleAppointmentReminders(tenantId, appointmentId, appo
     );
     
     if (!settings || settings.length === 0) {
-      // No settings, use default: 24h email reminder
-      const sendAt = calculateSendAt(appointmentStart, '24h');
-      await execute(
-        `INSERT INTO appointment_reminders 
-         (tenant_id, appointment_id, reminder_type, send_at, method, status)
-         VALUES (?, ?, 'appointment_upcoming', ?, 'email', 'pending')`,
-        [tenantId, appointmentId, toMySQLDateTime(sendAt)]
-      );
+      // No settings: create 24h / 2h / 30m email reminders by default
+      const fallbackTimings = ['24h', '2h', '30m'];
+      for (const timing of fallbackTimings) {
+        const sendAt = calculateSendAt(appointmentStart, timing);
+        await execute(
+          `INSERT INTO appointment_reminders
+           (tenant_id, appointment_id, reminder_type, send_at, method, status)
+           VALUES (?, ?, 'appointment_upcoming', ?, 'email', 'pending')`,
+          [tenantId, appointmentId, toMySQLDateTime(sendAt)]
+        );
+      }
       return;
     }
     
@@ -71,36 +141,31 @@ export async function scheduleAppointmentReminders(tenantId, appointmentId, appo
       ? JSON.parse(setting.channels) 
       : setting.channels || ['email'];
     
-    const hoursBefore = setting.hours_before || 24;
-    const timing = hoursBefore >= 24 ? '24h' : hoursBefore >= 2 ? '2h' : '30m';
-    const sendAt = calculateSendAt(appointmentStart, timing);
-    
-    // Create reminder for each enabled channel
-    for (const channel of channels) {
-      if (channel === 'in_app') {
-        // In-app notifications are handled separately via notify.js
-        continue;
-      }
-      
-      // Skip SMS for now - only create email reminders
-      if (channel === 'sms') {
-        console.log(`⚠️  SMS reminder skipped (SMS disabled). Creating email reminder instead.`);
-        // Create email reminder instead
+    const timingOptions = parseTimingOptions(setting);
+
+    // Create reminder for each timing + enabled channel
+    for (const timingHours of timingOptions) {
+      const timingLabel = getTimingLabelFromHours(timingHours);
+      const sendAt = calculateSendAt(appointmentStart, timingLabel);
+
+      for (const channel of channels) {
+        if (channel === 'in_app') {
+          // In-app notifications are handled separately via notify.js
+          continue;
+        }
+
+        if (channel === 'sms') {
+          // SMS is intentionally disabled for now
+          continue;
+        }
+
         await execute(
-          `INSERT INTO appointment_reminders 
+          `INSERT INTO appointment_reminders
            (tenant_id, appointment_id, reminder_type, send_at, method, status)
-           VALUES (?, ?, 'appointment_upcoming', ?, 'email', 'pending')`,
-          [tenantId, appointmentId, toMySQLDateTime(sendAt)]
+           VALUES (?, ?, 'appointment_upcoming', ?, ?, 'pending')`,
+          [tenantId, appointmentId, toMySQLDateTime(sendAt), channel]
         );
-        continue;
       }
-      
-      await execute(
-        `INSERT INTO appointment_reminders 
-         (tenant_id, appointment_id, reminder_type, send_at, method, status)
-         VALUES (?, ?, 'appointment_upcoming', ?, ?, 'pending')`,
-        [tenantId, appointmentId, toMySQLDateTime(sendAt), channel]
-      );
     }
     
     // Also create in-app notification if enabled
@@ -286,66 +351,19 @@ async function sendReminder(reminder) {
         );
         return { success: true };
       } else {
-        // Update retry count
         const newRetryCount = (reminder.retry_count || 0) + 1;
-        const status = newRetryCount >= 3 ? 'failed' : 'pending';
-        await execute(
-          `UPDATE appointment_reminders 
-           SET retry_count = ?, status = ?, error_message = ? 
-           WHERE id = ?`,
-          [newRetryCount, status, result.error || 'Failed to send email', reminder.id]
-        );
+        await markReminderFailed(reminder.id, newRetryCount, result.error || 'Failed to send email');
         return { success: false, error: result.error };
       }
       
     } else if (reminder.method === 'sms') {
-      // SMS functionality temporarily disabled - using email instead
-      // TODO: Re-enable SMS when Twilio is configured
-      console.log(`⚠️  SMS reminder skipped (SMS disabled). Reminder ID: ${reminder.id}`);
-      
-      // Mark as sent to avoid retries, but log that it was skipped
       await execute(
-        `UPDATE appointment_reminders 
-         SET status = 'sent', sent_at = NOW(), error_message = 'SMS disabled - skipped' 
+        `UPDATE appointment_reminders
+         SET status = 'sent', sent_at = NOW(), error_message = 'SMS disabled'
          WHERE id = ?`,
         [reminder.id]
       );
       return { success: true, skipped: true };
-      
-      /* SMS CODE - COMMENTED OUT FOR NOW
-      if (!appointment.phone) {
-        return { success: false, error: 'Customer phone not found' };
-      }
-      
-      const phoneNumber = formatPhoneNumber(appointment.phone);
-      const smsMessage = `${finalSubject}\n\n${finalBody}`;
-      
-      const result = await sendSMS({
-        to: phoneNumber,
-        message: smsMessage,
-      });
-      
-      if (result.success) {
-        await execute(
-          `UPDATE appointment_reminders 
-           SET status = 'sent', sent_at = NOW(), error_message = NULL 
-           WHERE id = ?`,
-          [reminder.id]
-        );
-        return { success: true };
-      } else {
-        // Update retry count
-        const newRetryCount = (reminder.retry_count || 0) + 1;
-        const status = newRetryCount >= 3 ? 'failed' : 'pending';
-        await execute(
-          `UPDATE appointment_reminders 
-           SET retry_count = ?, status = ?, error_message = ? 
-           WHERE id = ?`,
-          [newRetryCount, status, result.error || 'Failed to send SMS', reminder.id]
-        );
-        return { success: false, error: result.error };
-      }
-      */
     }
     
     return { success: false, error: 'Unknown reminder method' };
@@ -353,15 +371,8 @@ async function sendReminder(reminder) {
   } catch (error) {
     console.error('Error sending reminder:', error);
     
-    // Update reminder with error
     const newRetryCount = (reminder.retry_count || 0) + 1;
-    const status = newRetryCount >= 3 ? 'failed' : 'pending';
-    await execute(
-      `UPDATE appointment_reminders 
-       SET retry_count = ?, status = ?, error_message = ? 
-       WHERE id = ?`,
-      [newRetryCount, status, error.message || 'Unknown error', reminder.id]
-    );
+    await markReminderFailed(reminder.id, newRetryCount, error.message || 'Unknown error');
     
     return { success: false, error: error.message };
   }
@@ -380,6 +391,7 @@ export async function processPendingReminders() {
       `SELECT * FROM appointment_reminders 
        WHERE status = 'pending' 
        AND send_at <= NOW()
+       AND (next_retry_at IS NULL OR next_retry_at <= NOW())
        ORDER BY send_at ASC
        LIMIT 50`
     );

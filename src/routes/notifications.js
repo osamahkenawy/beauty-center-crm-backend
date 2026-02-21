@@ -50,6 +50,7 @@ async function ensureTables() {
       reminder_type ENUM('appointment_upcoming','appointment_followup','review_request','birthday','inactive_client','payment_due','membership_expiry','package_expiry','stock_low') NOT NULL,
       is_enabled TINYINT(1) DEFAULT 1,
       hours_before INT DEFAULT 24,
+      timing_options JSON DEFAULT NULL,
       channels JSON DEFAULT NULL,
       template_subject VARCHAR(255) DEFAULT NULL,
       template_body TEXT DEFAULT NULL,
@@ -58,6 +59,12 @@ async function ensureTables() {
       UNIQUE KEY uk_tenant_type (tenant_id, reminder_type)
     )
   `);
+
+  try {
+    await execute(`ALTER TABLE reminder_settings ADD COLUMN timing_options JSON DEFAULT NULL AFTER hours_before`);
+  } catch (_) {
+    // Column already exists
+  }
 
   await execute(`
     CREATE TABLE IF NOT EXISTS notification_preferences (
@@ -342,7 +349,7 @@ router.get('/reminders', async (req, res) => {
     // If no settings exist, create defaults
     if (rows.length === 0) {
       const defaults = [
-        { type: 'appointment_upcoming', hours: 24, channels: ['in_app','email'], subject: 'Appointment Reminder', body: 'Your appointment is coming up in {hours} hours.' },
+        { type: 'appointment_upcoming', hours: 24, timings: [24, 2, 0.5], channels: ['in_app','email'], subject: 'Appointment Reminder', body: 'Your appointment is coming up in {hours} hours.' },
         { type: 'appointment_followup', hours: 48, channels: ['in_app','email'], subject: 'How was your visit?', body: 'We hope you enjoyed your visit! Please leave us a review.' },
         { type: 'review_request', hours: 24, channels: ['in_app'], subject: 'Share Your Experience', body: 'Please take a moment to review your recent service.' },
         { type: 'birthday', hours: 0, channels: ['in_app','email'], subject: 'Happy Birthday! 🎂', body: 'Wishing you a wonderful birthday! Here\'s a special gift for you.' },
@@ -355,9 +362,9 @@ router.get('/reminders', async (req, res) => {
 
       for (const d of defaults) {
         await execute(
-          `INSERT INTO reminder_settings (tenant_id, reminder_type, is_enabled, hours_before, channels, template_subject, template_body)
-           VALUES (?, ?, 1, ?, ?, ?, ?)`,
-          [tenantId, d.type, d.hours, JSON.stringify(d.channels), d.subject, d.body]
+          `INSERT INTO reminder_settings (tenant_id, reminder_type, is_enabled, hours_before, timing_options, channels, template_subject, template_body)
+           VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
+          [tenantId, d.type, d.hours, d.timings ? JSON.stringify(d.timings) : null, JSON.stringify(d.channels), d.subject, d.body]
         );
       }
 
@@ -366,6 +373,17 @@ router.get('/reminders', async (req, res) => {
         [tenantId]
       );
       return res.json({ success: true, data: newRows });
+    }
+
+    // Backfill timing options for existing appointment reminder rows
+    for (const row of rows) {
+      if (row.reminder_type === 'appointment_upcoming' && !row.timing_options) {
+        await execute(
+          'UPDATE reminder_settings SET timing_options = ? WHERE id = ? AND tenant_id = ?',
+          [JSON.stringify([24, 2, 0.5]), row.id, tenantId]
+        );
+        row.timing_options = JSON.stringify([24, 2, 0.5]);
+      }
     }
 
     res.json({ success: true, data: rows });
@@ -379,13 +397,14 @@ router.get('/reminders', async (req, res) => {
 router.patch('/reminders/:id', async (req, res) => {
   try {
     const tenantId = req.tenantId;
-    const { is_enabled, hours_before, channels, template_subject, template_body } = req.body;
+    const { is_enabled, hours_before, timing_options, channels, template_subject, template_body } = req.body;
 
     const fields = [];
     const params = [];
 
     if (is_enabled !== undefined) { fields.push('is_enabled = ?'); params.push(is_enabled ? 1 : 0); }
     if (hours_before !== undefined) { fields.push('hours_before = ?'); params.push(hours_before); }
+    if (timing_options !== undefined) { fields.push('timing_options = ?'); params.push(JSON.stringify(timing_options)); }
     if (channels) { fields.push('channels = ?'); params.push(JSON.stringify(channels)); }
     if (template_subject !== undefined) { fields.push('template_subject = ?'); params.push(template_subject); }
     if (template_body !== undefined) { fields.push('template_body = ?'); params.push(template_body); }

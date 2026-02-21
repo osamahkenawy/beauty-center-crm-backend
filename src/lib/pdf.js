@@ -2,6 +2,28 @@ import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
 import { query } from './database.js';
 
+async function fetchImageBuffer(url) {
+  if (!url || typeof url !== 'string') return null;
+
+  try {
+    if (url.startsWith('data:image/')) {
+      const base64 = url.split(',')[1] || '';
+      return Buffer.from(base64, 'base64');
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const arr = await response.arrayBuffer();
+    return Buffer.from(arr);
+  } catch {
+    return null;
+  }
+}
+
+function getCurrencySymbol(invoice) {
+  return invoice.currency || 'AED';
+}
+
 /**
  * Generate PDF invoice
  * @param {Object} invoice - Invoice data with items
@@ -40,8 +62,10 @@ export async function generateInvoicePDF(invoice, tenantInfo) {
       // Logo (if available)
       if (tenantInfo.logo_url) {
         try {
-          // For now, we'll add a placeholder. In production, you'd fetch and embed the image
-          // doc.image(tenantInfo.logo_url, 50, 50, { width: 80, height: 80 });
+          const logoBuffer = await fetchImageBuffer(tenantInfo.logo_url);
+          if (logoBuffer) {
+            doc.image(logoBuffer, 50, 50, { fit: [128, 82], align: 'left', valign: 'top' });
+          }
         } catch (e) {
           // If logo fails, continue without it
         }
@@ -142,7 +166,7 @@ export async function generateInvoicePDF(invoice, tenantInfo) {
 
       // Table rows
       let currentY = tableTop + 30;
-      const currencySymbol = invoice.currency === 'AED' ? 'د.إ' : (invoice.currency || 'AED');
+      const currencySymbol = getCurrencySymbol(invoice);
       
       doc.font('Helvetica').fillColor(secondaryColor);
       invoice.items.forEach((item, index) => {
@@ -342,4 +366,131 @@ export async function getTenantInfo(tenantId) {
       company_name: 'Beauty Center'
     };
   }
+}
+
+/**
+ * Generate payment receipt PDF
+ * @param {Object} invoice - Invoice data with items
+ * @param {Object} tenantInfo - Tenant/business information
+ * @returns {Promise<Buffer>} PDF buffer
+ */
+export async function generateReceiptPDF(invoice, tenantInfo) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 50,
+        info: {
+          Title: `Receipt ${invoice.invoice_number}`,
+          Author: tenantInfo.name || 'Beauty Center',
+          Subject: 'Payment Receipt',
+        }
+      });
+
+      const buffers = [];
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', reject);
+
+      const primaryColor = '#1e293b';
+      const secondaryColor = '#64748b';
+      const successColor = '#10b981';
+      const currencySymbol = getCurrencySymbol(invoice);
+      const amountPaid = parseFloat(invoice.amount_paid || 0);
+
+      if (tenantInfo.logo_url) {
+        const logoBuffer = await fetchImageBuffer(tenantInfo.logo_url);
+        if (logoBuffer) {
+          doc.image(logoBuffer, 50, 45, { fit: [118, 72], align: 'left', valign: 'top' });
+        }
+      }
+
+      doc.fontSize(26).font('Helvetica-Bold').fillColor(successColor);
+      doc.text('PAYMENT RECEIPT', 50, 55, { align: 'right' });
+      doc.fontSize(11).font('Helvetica').fillColor(secondaryColor);
+      doc.text(`Receipt for Invoice #${invoice.invoice_number}`, 50, 88, { align: 'right' });
+
+      doc.moveTo(50, 125).lineTo(545, 125).strokeColor('#e2e8f0').stroke();
+
+      doc.fontSize(14).font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text(tenantInfo.name || tenantInfo.company_name || 'Beauty Center', 50, 145);
+      doc.fontSize(10).font('Helvetica').fillColor(secondaryColor);
+      let y = 167;
+      if (tenantInfo.address) { doc.text(tenantInfo.address, 50, y); y += 14; }
+      if (tenantInfo.city || tenantInfo.country) { doc.text([tenantInfo.city, tenantInfo.country].filter(Boolean).join(', '), 50, y); y += 14; }
+      if (tenantInfo.email) { doc.text(`Email: ${tenantInfo.email}`, 50, y); y += 14; }
+      if (tenantInfo.phone) { doc.text(`Phone: ${tenantInfo.phone}`, 50, y); y += 14; }
+
+      const customerName = `${invoice.customer_first_name || ''} ${invoice.customer_last_name || ''}`.trim() || 'Client';
+      doc.fontSize(12).font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text('Received From', 50, 250);
+      doc.fontSize(10).font('Helvetica').fillColor(secondaryColor);
+      doc.text(customerName, 50, 270);
+      if (invoice.customer_email) doc.text(invoice.customer_email, 50, 285);
+      if (invoice.customer_phone) doc.text(invoice.customer_phone, 50, 300);
+
+      const metaX = 340;
+      const paidDate = invoice.paid_at || invoice.updated_at || new Date();
+      doc.fontSize(10).font('Helvetica').fillColor(secondaryColor);
+      doc.text('Receipt Date:', metaX, 250);
+      doc.font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text(new Date(paidDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), metaX + 80, 250);
+
+      doc.font('Helvetica').fillColor(secondaryColor);
+      doc.text('Payment Method:', metaX, 268);
+      doc.font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text((invoice.payment_method || 'N/A').replace(/_/g, ' ').toUpperCase(), metaX + 95, 268);
+
+      doc.font('Helvetica').fillColor(secondaryColor);
+      doc.text('Invoice Status:', metaX, 286);
+      doc.font('Helvetica-Bold').fillColor(successColor);
+      doc.text((invoice.status || 'paid').replace(/_/g, ' ').toUpperCase(), metaX + 85, 286);
+
+      doc.roundedRect(50, 340, 495, 120, 8).fillAndStroke('#f8fafc', '#e2e8f0');
+      doc.fontSize(12).font('Helvetica').fillColor(secondaryColor);
+      doc.text('Invoice Total', 70, 366);
+      doc.text('Total Paid', 70, 400);
+      doc.text('Balance', 70, 434);
+
+      const balance = Math.max(0, parseFloat(invoice.total || 0) - amountPaid);
+      const valueX = 380;
+      const valueW = 145;
+
+      doc.font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text(`${currencySymbol} ${parseFloat(invoice.total || 0).toFixed(2)}`, valueX, 366, { width: valueW, align: 'right' });
+      doc.fillColor(successColor);
+      doc.text(`${currencySymbol} ${amountPaid.toFixed(2)}`, valueX, 400, { width: valueW, align: 'right' });
+      doc.fillColor(balance <= 0 ? successColor : '#ef4444');
+      doc.text(`${currencySymbol} ${balance.toFixed(2)}`, valueX, 434, { width: valueW, align: 'right' });
+
+      const qrData = JSON.stringify({
+        type: 'receipt',
+        invoice_id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        paid_at: paidDate,
+        amount_paid: amountPaid,
+        status: invoice.status,
+      });
+      const qrCodeDataURL = await QRCode.toDataURL(qrData, { width: 100, margin: 1 });
+      const qrBuffer = Buffer.from(qrCodeDataURL.replace(/^data:image\/png;base64,/, ''), 'base64');
+      doc.image(qrBuffer, 440, 480, { width: 80, height: 80 });
+      doc.fontSize(8).font('Helvetica').fillColor(secondaryColor);
+      doc.text('Scan to verify receipt', 430, 565, { width: 100, align: 'center' });
+
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text('Thank you for your payment!', 50, 510);
+
+      if (invoice.notes) {
+        doc.fontSize(9).font('Helvetica').fillColor(secondaryColor);
+        doc.text(`Notes: ${invoice.notes}`, 50, 535, { width: 350 });
+      }
+
+      doc.fontSize(8).font('Helvetica').fillColor('#94a3b8');
+      doc.text(`Generated on ${new Date().toLocaleString('en-GB')}`, 50, 780, { align: 'center', width: 500 });
+
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
