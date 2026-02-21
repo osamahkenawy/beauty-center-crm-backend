@@ -57,34 +57,121 @@ router.get('/revenue', async (req, res) => {
   }
 });
 
-// ── Staff Performance ──
+// ── Staff Performance (summary list) ──
 router.get('/staff-performance', async (req, res) => {
   try {
     const t = req.tenantId;
     const { from_date, to_date } = req.query;
-    let df = ''; const params = [t];
-    if (from_date) { df += ' AND DATE(a.start_time) >= ?'; params.push(from_date); }
-    if (to_date) { df += ' AND DATE(a.start_time) <= ?'; params.push(to_date); }
+    let df = ''; const dateParams = [];
+    if (from_date) { df += ' AND DATE(a.start_time) >= ?'; dateParams.push(from_date); }
+    if (to_date)   { df += ' AND DATE(a.start_time) <= ?'; dateParams.push(to_date);   }
 
     const staff = await query(`
-      SELECT s.id, s.full_name, s.role, s.avatar_url,
+      SELECT
+        s.id, s.full_name, s.role, s.avatar_url, s.color,
+        COALESCE(s.commission_rate, 0) as commission_rate,
         COUNT(a.id) as total_appointments,
-        SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN a.status = 'cancelled' THEN 1 ELSE 0 END) as cancelled,
-        SUM(CASE WHEN a.status = 'no_show' THEN 1 ELSE 0 END) as no_shows,
-        ROUND(SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(a.id),0), 1) as completion_rate,
-        COALESCE(SUM(CASE WHEN a.status = 'completed' THEN p.unit_price ELSE 0 END), 0) as revenue
+        SUM(CASE WHEN a.status = 'completed'  THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN a.status = 'cancelled'  THEN 1 ELSE 0 END) as cancelled,
+        SUM(CASE WHEN a.status = 'no_show'    THEN 1 ELSE 0 END) as no_shows,
+        COUNT(DISTINCT a.customer_id) as unique_clients,
+        ROUND(
+          SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) * 100.0
+          / NULLIF(COUNT(a.id), 0), 1
+        ) as completion_rate,
+        COALESCE(SUM(CASE WHEN a.status = 'completed' THEN p.unit_price ELSE 0 END), 0) as revenue,
+        ROUND(
+          AVG(CASE WHEN a.status = 'completed'
+            THEN TIMESTAMPDIFF(MINUTE, a.start_time, a.end_time) END
+          ), 0
+        ) as avg_service_minutes,
+        /* simple client retention: clients who came back more than once */
+        (
+          SELECT COUNT(*) FROM (
+            SELECT customer_id
+            FROM appointments a2
+            WHERE a2.staff_id = s.id AND a2.tenant_id = ? ${df.replace(/a\./g, 'a2.')}
+              AND a2.status = 'completed'
+            GROUP BY customer_id
+            HAVING COUNT(*) > 1
+          ) ret
+        ) as returning_clients
       FROM staff s
       LEFT JOIN appointments a ON s.id = a.staff_id AND a.tenant_id = ? ${df}
       LEFT JOIN products p ON a.service_id = p.id
       WHERE s.tenant_id = ? AND s.is_active = 1
-      GROUP BY s.id, s.full_name, s.role, s.avatar_url
+      GROUP BY s.id, s.full_name, s.role, s.avatar_url, s.color, s.commission_rate
       ORDER BY revenue DESC
-    `, [...params, t]);
+    `, [t, ...dateParams, t, ...dateParams, t]);
 
     res.json({ success: true, data: staff });
   } catch (error) {
     console.error('Staff performance error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── Staff Performance: monthly trends for one staff member ──
+router.get('/staff-performance/:id/trends', async (req, res) => {
+  try {
+    const t = req.tenantId;
+    const staffId = parseInt(req.params.id);
+    const { months = 12 } = req.query;
+    const m = Math.min(24, Math.max(1, parseInt(months)));
+
+    const trends = await query(`
+      SELECT
+        DATE_FORMAT(a.start_time, '%Y-%m') as month,
+        COUNT(*)                                                            as total,
+        SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END)            as completed,
+        SUM(CASE WHEN a.status = 'cancelled' THEN 1 ELSE 0 END)            as cancelled,
+        SUM(CASE WHEN a.status = 'no_show'   THEN 1 ELSE 0 END)            as no_shows,
+        COALESCE(SUM(CASE WHEN a.status = 'completed' THEN p.unit_price ELSE 0 END), 0) as revenue,
+        COUNT(DISTINCT a.customer_id)                                       as unique_clients
+      FROM appointments a
+      LEFT JOIN products p ON a.service_id = p.id
+      WHERE a.tenant_id = ? AND a.staff_id = ?
+        AND a.start_time >= DATE_SUB(NOW(), INTERVAL ? MONTH)
+      GROUP BY DATE_FORMAT(a.start_time, '%Y-%m')
+      ORDER BY month ASC
+    `, [t, staffId, m]);
+
+    res.json({ success: true, data: trends });
+  } catch (error) {
+    console.error('Staff trends error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── Staff Performance: top services for one staff member ──
+router.get('/staff-performance/:id/services', async (req, res) => {
+  try {
+    const t  = req.tenantId;
+    const staffId = parseInt(req.params.id);
+    const { from_date, to_date } = req.query;
+    let df = ''; const params = [t, staffId];
+    if (from_date) { df += ' AND DATE(a.start_time) >= ?'; params.push(from_date); }
+    if (to_date)   { df += ' AND DATE(a.start_time) <= ?'; params.push(to_date);   }
+
+    const services = await query(`
+      SELECT
+        p.id, p.name,
+        COUNT(a.id) as total_bookings,
+        SUM(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) as completed,
+        COALESCE(SUM(CASE WHEN a.status = 'completed' THEN p.unit_price ELSE 0 END), 0) as revenue,
+        ROUND(AVG(CASE WHEN a.status = 'completed'
+          THEN TIMESTAMPDIFF(MINUTE, a.start_time, a.end_time) END), 0) as avg_minutes
+      FROM appointments a
+      JOIN products p ON a.service_id = p.id
+      WHERE a.tenant_id = ? AND a.staff_id = ? ${df}
+      GROUP BY p.id, p.name
+      ORDER BY total_bookings DESC
+      LIMIT 10
+    `, params);
+
+    res.json({ success: true, data: services });
+  } catch (error) {
+    console.error('Staff services error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
