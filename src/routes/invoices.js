@@ -546,7 +546,11 @@ router.patch('/:id', async (req, res) => {
 
     // Auto-earn loyalty points when marking as paid
     if (req.body.status === 'paid') {
-      const [paidInv] = await query('SELECT customer_id, total FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
+      const [paidInv] = await query('SELECT customer_id, total, appointment_id FROM invoices WHERE id = ? AND tenant_id = ?', [req.params.id, req.tenantId]);
+      // Sync appointment payment_status
+      if (paidInv?.appointment_id) {
+        await execute('UPDATE appointments SET payment_status = ? WHERE id = ? AND tenant_id = ?', ['paid', paidInv.appointment_id, req.tenantId]);
+      }
       if (paidInv?.customer_id && paidInv?.total > 0) {
         const loyaltyResult = await processAutoEarn(req.tenantId, paidInv.customer_id, parseFloat(paidInv.total), parseInt(req.params.id));
         if (loyaltyResult) {
@@ -696,6 +700,12 @@ router.post('/:id/pay', async (req, res) => {
       UPDATE invoices SET amount_paid = ?, status = ?, payment_method = ?, paid_at = IF(? = 'paid', NOW(), paid_at)
       WHERE id = ? AND tenant_id = ?
     `, [newPaid, newStatus, recordedMethod, newStatus, req.params.id, req.tenantId]);
+
+    // Sync appointment payment_status
+    if (inv.appointment_id) {
+      const apptPayStatus = newStatus === 'paid' ? 'paid' : 'partial';
+      await execute('UPDATE appointments SET payment_status = ? WHERE id = ? AND tenant_id = ?', [apptPayStatus, inv.appointment_id, req.tenantId]);
+    }
 
     // ── Step 4: Auto-earn loyalty when fully paid (skip if any part used points) ──
     let loyaltyResult = null;

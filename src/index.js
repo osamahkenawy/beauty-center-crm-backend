@@ -6,6 +6,7 @@ import cron from 'node-cron';
 import { config } from './config.js';
 import { initDatabase } from './lib/database.js';
 import { processPendingReminders } from './lib/reminders.js';
+import { runBillingCron } from './jobs/billing-cron.js';
 
 // Import middleware
 import { tenantMiddleware } from './middleware/tenant.js';
@@ -190,6 +191,16 @@ async function start() {
       }
     });
     console.log('✅ Reminder cron job started (runs every minute)');
+    
+    // Billing cron job — runs daily at 00:05 AM
+    cron.schedule('5 0 * * *', async () => {
+      try {
+        await runBillingCron();
+      } catch (error) {
+        console.error('❌ Billing cron job error:', error);
+      }
+    });
+    console.log('✅ Billing cron job started (runs daily at 00:05)');
     
     app.listen(config.port, () => {
       console.log(`

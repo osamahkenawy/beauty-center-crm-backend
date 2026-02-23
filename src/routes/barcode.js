@@ -12,8 +12,9 @@
 import express from 'express';
 import bwipjs from 'bwip-js';
 import QRCode from 'qrcode';
-import { query } from '../lib/database.js';
+import { query, execute } from '../lib/database.js';
 import { authMiddleware, verifyToken } from '../middleware/auth.js';
+import { sendNotificationEmail } from '../lib/email.js';
 
 const router = express.Router();
 
@@ -306,27 +307,155 @@ router.get('/lookup', authMiddleware, async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // POST /barcodes/appointment/:id/checkin
 // Check-in an appointment via QR scan.
-// Updates status to 'confirmed' (or marks customer_showed=1).
+// 1. Sets status → in_progress, customer_showed = 1
+// 2. Auto-creates a draft invoice if one doesn't exist yet
+// 3. Sends a payment QR email to the customer
 // ─────────────────────────────────────────────────────────────
 router.post('/appointment/:id/checkin', authMiddleware, async (req, res) => {
   try {
+    const tenantId = req.tenantId;
+    const apptId   = req.params.id;
+
+    // Fetch full appointment with joins needed for invoice + email
     const [appt] = await query(
-      'SELECT id, status FROM appointments WHERE id = ? AND tenant_id = ?',
-      [req.params.id, req.tenantId]
+      `SELECT a.id, a.status, a.customer_id, a.service_id, a.staff_id,
+              a.discount_amount, a.discount_type, a.original_price, a.final_price,
+              p.unit_price, p.name AS service_name, p.currency,
+              c.first_name AS customer_first_name, c.last_name AS customer_last_name,
+              c.email AS customer_email,
+              s.full_name AS staff_name
+       FROM appointments a
+       LEFT JOIN products p  ON a.service_id  = p.id
+       LEFT JOIN contacts c  ON a.customer_id = c.id
+       LEFT JOIN staff   s   ON a.staff_id    = s.id
+       WHERE a.id = ? AND a.tenant_id = ?`,
+      [apptId, tenantId]
     );
+
     if (!appt) return res.status(404).json({ success: false, message: 'Appointment not found' });
 
     if (appt.status === 'cancelled' || appt.status === 'no_show') {
       return res.status(400).json({ success: false, message: `Cannot check-in a ${appt.status} appointment` });
     }
 
-    await query(
+    // 1. Update appointment status
+    await execute(
       `UPDATE appointments SET customer_showed = 1, status = 'in_progress', updated_at = NOW()
        WHERE id = ? AND tenant_id = ?`,
-      [req.params.id, req.tenantId]
+      [apptId, tenantId]
     );
 
-    res.json({ success: true, message: 'Client checked in successfully', appointment_id: appt.id });
+    // Auto-complete any other stale in_progress appointments for the same customer
+    // (earlier appointments from the same day or previous days that were never closed)
+    if (appt.customer_id) {
+      await execute(
+        `UPDATE appointments
+         SET status = 'completed', updated_at = NOW()
+         WHERE tenant_id = ?
+           AND customer_id = ?
+           AND id != ?
+           AND status = 'in_progress'
+           AND start_time < (SELECT start_time FROM appointments WHERE id = ?)`,
+        [tenantId, appt.customer_id, apptId, apptId]
+      ).catch(e => console.warn('Could not auto-complete stale appointments:', e.message));
+    }
+
+    // 2. Create invoice if not already present
+    let invoiceId, invoiceNumber;
+    const [existingInv] = await query(
+      'SELECT id, invoice_number FROM invoices WHERE appointment_id = ? AND tenant_id = ?',
+      [apptId, tenantId]
+    );
+
+    if (existingInv) {
+      invoiceId     = existingInv.id;
+      invoiceNumber = existingInv.invoice_number;
+    } else {
+      // Generate next invoice number
+      const [lastInv] = await query(
+        "SELECT invoice_number FROM invoices WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
+        [tenantId]
+      );
+      const lastNum  = lastInv?.invoice_number ? parseInt(lastInv.invoice_number.replace(/\D/g, ''), 10) || 0 : 0;
+      invoiceNumber  = `INV-${String(lastNum + 1).padStart(4, '0')}`;
+
+      const basePrice  = parseFloat(appt.unit_price || appt.original_price || 0);
+      const promoDisc  = parseFloat(appt.discount_amount || 0);
+      const afterDisc  = Math.max(0, basePrice - promoDisc);
+      const taxRate    = 5;
+      const taxAmount  = afterDisc * (taxRate / 100);
+      const total      = afterDisc + taxAmount;
+
+      const invResult  = await execute(`
+        INSERT INTO invoices
+          (tenant_id, appointment_id, customer_id, staff_id,
+           invoice_number, subtotal, discount_amount, discount_type,
+           tax_rate, tax_amount, total, amount_paid, currency,
+           status, payment_method, notes, created_by)
+        VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?,?)
+      `, [
+        tenantId, apptId, appt.customer_id, appt.staff_id,
+        invoiceNumber, basePrice, promoDisc, appt.discount_type || 'fixed',
+        taxRate, taxAmount, total, 0, appt.currency || 'AED',
+        'sent', null, null, req.user?.id || null,
+      ]);
+      invoiceId = invResult.insertId;
+
+      // Add service line item
+      await execute(`
+        INSERT INTO invoice_items
+          (invoice_id, item_type, item_id, name, quantity, unit_price, total)
+        VALUES (?, 'service', ?, ?, 1, ?, ?)
+      `, [invoiceId, appt.service_id, appt.service_name || 'Service',
+          basePrice, basePrice]);
+    }
+
+    // 3. Send payment QR email to customer (fire-and-forget)
+    if (appt.customer_email) {
+      const customerName = `${appt.customer_first_name || ''} ${appt.customer_last_name || ''}`.trim() || 'Valued Client';
+      const qrBuffer = await QRCode.toBuffer(`INVOICE:${invoiceNumber}`, {
+        type: 'png', width: 200, margin: 2,
+        color: { dark: '#1a1a2e', light: '#ffffff' },
+      }).catch(() => null);
+
+      sendNotificationEmail({
+        to:      appt.customer_email,
+        subject: `Your Invoice is Ready — ${invoiceNumber}`,
+        title:   'Your Invoice is Ready 💳',
+        body: `
+          <p>Dear ${customerName},</p>
+          <p>Your session has started and your invoice is ready. Show the QR code below at the counter to complete your payment.</p>
+          <div style="background:#f8f9fa;padding:24px;border-radius:8px;margin:20px 0;text-align:center;">
+            <p style="margin:0 0 6px;font-size:13px;color:#888;">Invoice ${invoiceNumber}</p>
+            <p style="margin:0 0 16px;font-size:18px;font-weight:600;color:#333;">${appt.service_name || 'Service'}</p>
+            ${qrBuffer ? `<img src="cid:inv_qr" alt="Payment QR Code"
+              style="display:block;margin:0 auto 12px;width:160px;height:160px;border:4px solid #fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);" />
+            <p style="font-size:12px;color:#aaa;margin:0;">Show this QR at checkout to pay</p>` : ''}
+          </div>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;width:90px;">Service</td><td style="padding:6px 0;font-weight:500;">${appt.service_name || '—'}</td></tr>
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;">Staff</td><td style="padding:6px 0;font-weight:500;">${appt.staff_name || 'Our team'}</td></tr>
+            <tr><td style="padding:6px 0;color:#888;font-size:13px;">Invoice #</td><td style="padding:6px 0;font-weight:500;">${invoiceNumber}</td></tr>
+          </table>
+          <p style="color:#555;">Thank you for choosing us today!</p>
+        `,
+        tenantId,
+        attachments: qrBuffer ? [{
+          filename: 'invoice-qr.png',
+          content:  qrBuffer,
+          cid:      'inv_qr',
+          encoding: 'base64',
+        }] : [],
+      }).catch(e => console.warn('Check-in invoice email failed:', e.message));
+    }
+
+    res.json({
+      success: true,
+      message: 'Client checked in successfully',
+      appointment_id: apptId,
+      invoice_number: invoiceNumber,
+      invoice_id: invoiceId,
+    });
   } catch (err) {
     console.error('Check-in error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });

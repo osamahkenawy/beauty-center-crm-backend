@@ -554,6 +554,20 @@ router.patch('/:id', async (req, res) => {
       [id]
     );
 
+    // When status flips to in_progress: auto-complete stale in_progress from previous visits
+    if (status === 'in_progress' && existing.status !== 'in_progress' && existing.customer_id) {
+      execute(
+        `UPDATE appointments
+         SET status = 'completed', updated_at = NOW()
+         WHERE tenant_id = ?
+           AND customer_id = ?
+           AND id != ?
+           AND status = 'in_progress'
+           AND start_time < (SELECT start_time FROM (SELECT start_time FROM appointments WHERE id = ?) AS t)`,
+        [tenantId, existing.customer_id, id, id]
+      ).catch(e => console.warn('Could not auto-complete stale appointments:', e.message));
+    }
+
     // When status flips to in_progress: auto-create draft invoice + send payment QR email
     if (status === 'in_progress' && existing.status !== 'in_progress') {
       (async () => {

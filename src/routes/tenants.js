@@ -1,8 +1,16 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
+import Stripe from 'stripe';
 import { query, execute } from '../lib/database.js';
 import { authMiddleware, platformOwnerOnly, tenantOwnerOnly, adminOnly, generateToken } from '../middleware/auth.js';
 import crypto from 'crypto';
+
+// Stripe client — lazy init
+const getStripe = () => {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key || key.startsWith('sk_test_placeholder')) throw new Error('STRIPE_SECRET_KEY not configured');
+  return new Stripe(key, { apiVersion: '2024-06-20' });
+};
 
 const router = express.Router();
 
@@ -300,30 +308,216 @@ router.post('/current/reset-data', authMiddleware, adminOnly, async (req, res) =
 });
 
 /**
- * Get subscription info
+ * Get subscription info (reads from tenants table directly)
  */
 router.get('/subscription', authMiddleware, async (req, res) => {
   try {
-    const [subscription] = await query(
-      `SELECT s.*, t.trial_ends_at, t.status as tenant_status
-       FROM subscriptions s 
-       JOIN tenants t ON s.tenant_id = t.id
-       WHERE s.tenant_id = ?`,
+    const [tenant] = await query(
+      `SELECT id, name, plan, status, trial_ends_at, subscription_ends_at,
+              max_users, monthly_price, subscription_status, next_billing_date,
+              stripe_customer_id, stripe_subscription_id, grace_period_ends_at,
+              allowed_modules
+       FROM tenants WHERE id = ?`,
       [req.tenantId]
     );
     
-    if (!subscription) {
-      return res.status(404).json({ success: false, message: 'No subscription found' });
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: 'Tenant not found' });
     }
     
-    // Parse features
-    if (typeof subscription.features === 'string') {
-      subscription.features = JSON.parse(subscription.features);
+    // Calculate days remaining in trial
+    let trial_days_remaining = null;
+    if ((tenant.status === 'trial' || tenant.plan === 'trial') && tenant.trial_ends_at) {
+      const diff = new Date(tenant.trial_ends_at) - new Date();
+      trial_days_remaining = Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
     }
     
-    res.json({ success: true, data: subscription });
+    res.json({
+      success: true,
+      data: {
+        ...tenant,
+        trial_days_remaining,
+        is_trial: tenant.status === 'trial' || tenant.plan === 'trial',
+        is_active: tenant.status === 'active' && (tenant.subscription_status === 'active' || !tenant.subscription_status),
+        is_past_due: tenant.subscription_status === 'past_due',
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to get subscription' });
+  }
+});
+
+/**
+ * GET /tenants/billing — full billing info for tenant admin
+ */
+router.get('/billing', authMiddleware, async (req, res) => {
+  try {
+    const [tenant] = await query(
+      `SELECT id, name, plan, status, trial_ends_at, subscription_ends_at,
+              max_users, monthly_price, subscription_status, next_billing_date,
+              stripe_customer_id, stripe_subscription_id, grace_period_ends_at
+       FROM tenants WHERE id = ?`,
+      [req.tenantId]
+    );
+    if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+
+    // Load available plans from billing_plans table
+    let plans = [];
+    try {
+      plans = await query('SELECT plan_key, label, price, currency, max_users, features, color, description FROM billing_plans WHERE is_active = 1 ORDER BY sort_order ASC');
+      plans = plans.map(p => {
+        let features = p.features;
+        if (typeof features === 'string') try { features = JSON.parse(features); } catch { features = []; }
+        return { ...p, features };
+      });
+    } catch (e) { /* table may not exist yet */ }
+
+    let trial_days_remaining = null;
+    if ((tenant.status === 'trial' || tenant.plan === 'trial') && tenant.trial_ends_at) {
+      const diff = new Date(tenant.trial_ends_at) - new Date();
+      trial_days_remaining = Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+    }
+
+    res.json({
+      success: true,
+      data: {
+        ...tenant,
+        trial_days_remaining,
+        plans,
+      }
+    });
+  } catch (error) {
+    console.error('Tenant billing error:', error);
+    res.status(500).json({ success: false, message: 'Failed to get billing info' });
+  }
+});
+
+/**
+ * POST /tenants/billing/checkout — tenant creates own Stripe Checkout session
+ */
+router.post('/billing/checkout', authMiddleware, async (req, res) => {
+  try {
+    const stripe = getStripe();
+    const { plan } = req.body;
+    if (!plan) return res.status(400).json({ success: false, message: 'Plan is required' });
+
+    // Load plan from DB
+    const [planRow] = await query('SELECT * FROM billing_plans WHERE plan_key = ? AND is_active = 1', [plan]);
+    if (!planRow) return res.status(400).json({ success: false, message: 'Invalid plan' });
+    let features = planRow.features;
+    if (typeof features === 'string') try { features = JSON.parse(features); } catch { features = []; }
+
+    const [tenant] = await query('SELECT * FROM tenants WHERE id = ?', [req.tenantId]);
+    if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+
+    // Create or retrieve Stripe customer
+    let customerId = tenant.stripe_customer_id;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: tenant.email || tenant.billing_email,
+        name: tenant.name,
+        metadata: { tenant_id: String(req.tenantId), platform: 'trasealla_crm' },
+      });
+      customerId = customer.id;
+      await execute('UPDATE tenants SET stripe_customer_id = ? WHERE id = ?', [customerId, req.tenantId]);
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    
+    // If plan has a stripe_price_id, use it; otherwise use price_data
+    const lineItem = planRow.stripe_price_id ? {
+      price: planRow.stripe_price_id,
+      quantity: 1,
+    } : {
+      price_data: {
+        currency: planRow.currency || 'aed',
+        product_data: {
+          name: `Trasealla CRM — ${planRow.label} Plan`,
+          description: Array.isArray(features) ? features.join(' · ') : '',
+        },
+        unit_amount: Math.round(Number(planRow.price) * 100),
+        recurring: { interval: 'month' },
+      },
+      quantity: 1,
+    };
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      mode: 'subscription',
+      line_items: [lineItem],
+      metadata: { tenant_id: String(req.tenantId), plan },
+      success_url: `${frontendUrl}/billing?success=1&plan=${plan}`,
+      cancel_url:  `${frontendUrl}/billing?canceled=1`,
+      subscription_data: {
+        metadata: { tenant_id: String(req.tenantId), plan },
+      },
+    });
+
+    res.json({ success: true, url: session.url, session_id: session.id });
+  } catch (error) {
+    console.error('Tenant checkout error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to create checkout session' });
+  }
+});
+
+/**
+ * POST /tenants/billing/portal — open Stripe Customer Portal
+ */
+router.post('/billing/portal', authMiddleware, async (req, res) => {
+  try {
+    const stripe = getStripe();
+    const [tenant] = await query('SELECT stripe_customer_id FROM tenants WHERE id = ?', [req.tenantId]);
+    if (!tenant?.stripe_customer_id) {
+      return res.status(400).json({ success: false, message: 'No Stripe customer found. Please subscribe first.' });
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const session = await stripe.billingPortal.sessions.create({
+      customer: tenant.stripe_customer_id,
+      return_url: `${frontendUrl}/billing`,
+    });
+    res.json({ success: true, url: session.url });
+  } catch (error) {
+    console.error('Tenant portal error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to open billing portal' });
+  }
+});
+
+/**
+ * GET /tenants/billing/invoices — fetch invoice history from Stripe
+ */
+router.get('/billing/invoices', authMiddleware, async (req, res) => {
+  try {
+    const stripe = getStripe();
+    const [tenant] = await query('SELECT stripe_customer_id FROM tenants WHERE id = ?', [req.tenantId]);
+    if (!tenant?.stripe_customer_id) {
+      return res.json({ success: true, invoices: [] });
+    }
+
+    const invoices = await stripe.invoices.list({
+      customer: tenant.stripe_customer_id,
+      limit: 24,
+    });
+
+    const formatted = invoices.data.map(inv => ({
+      id: inv.id,
+      number: inv.number,
+      status: inv.status,
+      amount_due: inv.amount_due / 100,
+      amount_paid: inv.amount_paid / 100,
+      currency: inv.currency,
+      created: new Date(inv.created * 1000).toISOString(),
+      period_start: inv.period_start ? new Date(inv.period_start * 1000).toISOString() : null,
+      period_end: inv.period_end ? new Date(inv.period_end * 1000).toISOString() : null,
+      invoice_pdf: inv.invoice_pdf,
+      hosted_invoice_url: inv.hosted_invoice_url,
+    }));
+
+    res.json({ success: true, invoices: formatted });
+  } catch (error) {
+    console.error('Tenant invoices error:', error);
+    res.json({ success: true, invoices: [] }); // Graceful fallback
   }
 });
 
@@ -338,12 +532,12 @@ router.get('/usage', authMiddleware, async (req, res) => {
     const [contacts] = await query('SELECT COUNT(*) as count FROM contacts WHERE tenant_id = ?', [tenantId]);
     const [leads] = await query('SELECT COUNT(*) as count FROM leads WHERE tenant_id = ?', [tenantId]);
     const [deals] = await query('SELECT COUNT(*) as count FROM deals WHERE tenant_id = ?', [tenantId]);
-    const [subscription] = await query('SELECT max_users FROM subscriptions WHERE tenant_id = ?', [tenantId]);
+    const [tenant] = await query('SELECT max_users FROM tenants WHERE id = ?', [tenantId]);
     
     res.json({
       success: true,
       data: {
-        users: { current: users?.count || 0, max: subscription?.max_users || 5 },
+        users: { current: users?.count || 0, max: tenant?.max_users || 5 },
         contacts: contacts?.count || 0,
         leads: leads?.count || 0,
         deals: deals?.count || 0

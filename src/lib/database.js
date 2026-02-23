@@ -114,7 +114,7 @@ async function createTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  // Subscriptions table
+  // Subscriptions table (legacy — kept for backward compat, real billing data on tenants table)
   await execute(`
     CREATE TABLE IF NOT EXISTS subscriptions (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -138,6 +138,46 @@ async function createTables() {
       INDEX idx_tenant (tenant_id),
       INDEX idx_status (status),
       FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // ─── Billing Plans table (configurable from super admin settings) ───
+  await execute(`
+    CREATE TABLE IF NOT EXISTS billing_plans (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      plan_key VARCHAR(50) UNIQUE NOT NULL,
+      label VARCHAR(100) NOT NULL,
+      price DECIMAL(10,2) NOT NULL DEFAULT 0,
+      currency VARCHAR(10) DEFAULT 'aed',
+      billing_cycle ENUM('monthly','yearly') DEFAULT 'monthly',
+      max_users INT DEFAULT 10,
+      features JSON,
+      stripe_price_id VARCHAR(255),
+      is_active TINYINT(1) DEFAULT 1,
+      sort_order INT DEFAULT 0,
+      color VARCHAR(20) DEFAULT '#3b82f6',
+      description TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_active (is_active),
+      INDEX idx_sort (sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // ─── Stripe webhook logs for audit/idempotency ───
+  await execute(`
+    CREATE TABLE IF NOT EXISTS stripe_webhook_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      stripe_event_id VARCHAR(255) UNIQUE NOT NULL,
+      event_type VARCHAR(100) NOT NULL,
+      tenant_id INT,
+      payload JSON,
+      status ENUM('processed','failed','duplicate') DEFAULT 'processed',
+      error_message TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_event_id (stripe_event_id),
+      INDEX idx_event_type (event_type),
+      INDEX idx_tenant (tenant_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -1048,6 +1088,51 @@ async function runMultiTenantMigrations() {
   try {
     await pool.execute("ALTER TABLE staff MODIFY COLUMN role VARCHAR(50) DEFAULT 'staff'");
   } catch (e) { /* already VARCHAR or other issue */ }
+
+  // ============================================================
+  // Billing / Stripe column migrations on tenants table
+  // These consolidate all subscription data onto the tenants table
+  // ============================================================
+  const billingColumns = [
+    { column: 'plan',                  definition: "VARCHAR(50) DEFAULT 'trial'" },
+    { column: 'monthly_price',         definition: "DECIMAL(10,2) DEFAULT 0.00" },
+    { column: 'billing_email',         definition: "VARCHAR(255)" },
+    { column: 'subscription_ends_at',  definition: "DATETIME" },
+    { column: 'max_users',             definition: "INT DEFAULT 5" },
+    { column: 'allowed_modules',       definition: "TEXT" },
+    { column: 'is_active',             definition: "TINYINT(1) DEFAULT 1" },
+    { column: 'stripe_customer_id',    definition: "VARCHAR(100)" },
+    { column: 'stripe_subscription_id',definition: "VARCHAR(100)" },
+    { column: 'stripe_price_id',       definition: "VARCHAR(100)" },
+    { column: 'subscription_status',   definition: "VARCHAR(50)" },
+    { column: 'next_billing_date',     definition: "DATETIME" },
+    { column: 'grace_period_ends_at',  definition: "DATETIME" },
+  ];
+  for (const { column, definition } of billingColumns) {
+    try {
+      await execute(`ALTER TABLE tenants ADD COLUMN ${column} ${definition}`);
+      console.log(`  Added tenants.${column}`);
+    } catch (e) { /* exists */ }
+  }
+
+  // ─── Seed default billing plans if table is empty ───
+  try {
+    const [planRows] = await pool.execute('SELECT COUNT(*) AS cnt FROM billing_plans');
+    if (planRows[0].cnt === 0) {
+      const defaultPlans = [
+        ['starter',      'Starter',      199, 'aed', 10,  JSON.stringify(['Up to 10 staff', 'All core modules', 'Email support']),                                     '#3b82f6', 1, 'Perfect for small beauty centers getting started'],
+        ['professional', 'Professional', 399, 'aed', 25,  JSON.stringify(['Up to 25 staff', 'All modules + AI', 'Priority support', 'Custom branding']),                '#8b5cf6', 2, 'For growing salons that need advanced features'],
+        ['enterprise',   'Enterprise',   799, 'aed', 100, JSON.stringify(['Unlimited staff', 'All modules + dedicated AI', '24/7 SLA support', 'White-label', 'API access']), '#d97706', 3, 'Full-featured for large multi-location businesses'],
+      ];
+      for (const [key, label, price, currency, maxUsers, features, color, sort, desc] of defaultPlans) {
+        await execute(
+          `INSERT INTO billing_plans (plan_key, label, price, currency, max_users, features, color, sort_order, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [key, label, price, currency, maxUsers, features, color, sort, desc]
+        );
+      }
+      console.log('  Seeded default billing plans (starter, professional, enterprise)');
+    }
+  } catch (e) { console.log('  billing_plans seed skip:', e.message); }
 
   console.log('Multi-tenant migrations completed');
 }

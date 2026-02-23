@@ -45,7 +45,11 @@ export const tenantMiddleware = async (req, res, next) => {
     // Validate tenant exists and is active
     if (tenantId) {
       const [tenant] = await query(
-        'SELECT t.*, s.plan, s.max_users, s.current_users, s.status as subscription_status FROM tenants t LEFT JOIN subscriptions s ON t.id = s.tenant_id WHERE t.id = ?',
+        `SELECT t.*,
+                COALESCE(t.plan, 'trial') AS plan,
+                COALESCE(t.max_users, 5) AS max_users,
+                COALESCE(t.subscription_status, '') AS subscription_status
+         FROM tenants t WHERE t.id = ?`,
         [tenantId]
       );
       
@@ -53,17 +57,58 @@ export const tenantMiddleware = async (req, res, next) => {
         return res.status(404).json({ success: false, message: 'Tenant not found' });
       }
       
+      // ── Account lockout checks — return 423 Locked with reason ──
       if (tenant.status === 'suspended') {
-        return res.status(403).json({ success: false, message: 'Account suspended. Please contact support.' });
+        return res.status(423).json({
+          success: false,
+          locked: true,
+          reason: tenant.subscription_status === 'past_due' ? 'payment_failed' : 'suspended',
+          message: 'Your account has been suspended. Please update your subscription to continue.',
+          upgrade_url: '/billing'
+        });
       }
       
       if (tenant.status === 'cancelled') {
-        return res.status(403).json({ success: false, message: 'Account cancelled.' });
+        return res.status(423).json({
+          success: false,
+          locked: true,
+          reason: 'cancelled',
+          message: 'Your account has been cancelled. Please subscribe to reactivate.',
+          upgrade_url: '/billing'
+        });
       }
       
-      // Check if trial expired
-      if (tenant.status === 'trial' && tenant.trial_ends_at && new Date(tenant.trial_ends_at) < new Date()) {
-        return res.status(403).json({ success: false, message: 'Trial period expired. Please upgrade to continue.' });
+      // Check if trial expired (1 day grace period)
+      // Check both status='trial' AND plan='trial' to catch all trial accounts
+      if ((tenant.status === 'trial' || tenant.plan === 'trial') && tenant.trial_ends_at) {
+        const trialEnd = new Date(tenant.trial_ends_at);
+        const now = new Date();
+        const graceEnd = new Date(trialEnd);
+        graceEnd.setDate(graceEnd.getDate() + 1); // 1 day grace
+        
+        if (now > graceEnd) {
+          return res.status(423).json({
+            success: false,
+            locked: true,
+            reason: 'trial_expired',
+            message: 'Your trial period has expired. Please choose a plan to continue.',
+            trial_ended_at: tenant.trial_ends_at,
+            upgrade_url: '/billing'
+          });
+        }
+      }
+
+      // Check past_due grace period
+      if (tenant.subscription_status === 'past_due' && tenant.grace_period_ends_at) {
+        if (new Date() > new Date(tenant.grace_period_ends_at)) {
+          return res.status(423).json({
+            success: false,
+            locked: true,
+            reason: 'payment_failed',
+            message: 'Your payment has failed and the grace period has ended. Please update your payment method.',
+            upgrade_url: '/billing'
+          });
+        }
       }
       
       req.tenantId = tenantId;
@@ -96,15 +141,16 @@ export const checkUserLimit = async (req, res, next) => {
   try {
     if (!req.tenantId) return next();
     
-    const [subscription] = await query(
-      'SELECT max_users, current_users FROM subscriptions WHERE tenant_id = ? AND status = "active"',
+    const maxUsers = req.tenant?.max_users || 5;
+    const [userCount] = await query(
+      'SELECT COUNT(*) AS current_users FROM staff WHERE tenant_id = ? AND is_active = 1',
       [req.tenantId]
     );
     
-    if (subscription && subscription.current_users >= subscription.max_users) {
+    if (userCount && userCount.current_users >= maxUsers) {
       return res.status(403).json({
         success: false,
-        message: `User limit reached (${subscription.max_users}). Please upgrade your plan.`
+        message: `User limit reached (${maxUsers}). Please upgrade your plan.`
       });
     }
     
@@ -127,22 +173,25 @@ export const checkFeature = (feature) => {
         return res.status(400).json({ success: false, message: 'Tenant context required' });
       }
       
-      const [subscription] = await query(
-        'SELECT features FROM subscriptions WHERE tenant_id = ? AND status = "active"',
-        [req.tenantId]
-      );
-      
-      if (!subscription) {
+      // Read allowed_modules from tenant (set by super admin)
+      const tenant = req.tenant;
+      if (!tenant) {
         return res.status(403).json({ success: false, message: 'No active subscription' });
       }
       
-      let features = subscription.features;
-      if (typeof features === 'string') {
-        features = JSON.parse(features);
+      // Enterprise / active paid plans get all features
+      if (tenant.plan === 'enterprise' || tenant.plan === 'professional') return next();
+      
+      let modules = tenant.allowed_modules;
+      if (typeof modules === 'string') {
+        try { modules = JSON.parse(modules); } catch { modules = null; }
       }
       
-      // Check if feature is enabled
-      if (!features || (!features.all && !features[feature])) {
+      // If no module restrictions set, allow all
+      if (!modules || (Array.isArray(modules) && modules.length === 0)) return next();
+      
+      // Check if feature is in allowed list
+      if (Array.isArray(modules) && !modules.includes(feature) && !modules.includes('all')) {
         return res.status(403).json({
           success: false,
           message: `Feature '${feature}' is not available in your plan. Please upgrade.`

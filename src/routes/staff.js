@@ -224,6 +224,13 @@ router.get('/stats', authMiddleware, async (req, res) => {
       revenueThisMonth = parseFloat(monthlyRev?.rev || 0);
     } catch (e) { /* */ }
 
+    // Fetch max_users from tenant
+    let maxUsers = 5;
+    try {
+      const [tenantRow] = await query('SELECT max_users FROM tenants WHERE id = ?', [tenantId]);
+      maxUsers = tenantRow?.max_users || 5;
+    } catch (e) { /* fallback to default */ }
+
     res.json({
       success: true,
       data: {
@@ -236,6 +243,7 @@ router.get('/stats', authMiddleware, async (req, res) => {
         pending_invites: totals?.pending_invites || 0,
         completed_this_month: completedThisMonth,
         revenue_this_month: revenueThisMonth,
+        max_users: maxUsers,
       }
     });
   } catch (error) {
@@ -268,7 +276,7 @@ router.get('/', authMiddleware, async (req, res) => {
     const params = [];
 
     if (tenantId) {
-      sql += ' AND (s.tenant_id = ? OR s.tenant_id IS NULL)';
+      sql += ' AND s.tenant_id = ? AND s.role != \'super_admin\'';
       params.push(tenantId);
     }
 
@@ -501,6 +509,22 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
 
     if (!full_name?.trim()) {
       return res.status(400).json({ success: false, message: 'Full name is required' });
+    }
+
+    // Enforce max_users limit
+    try {
+      const [tenantRow] = await query('SELECT max_users FROM tenants WHERE id = ?', [tenantId]);
+      const maxUsers = tenantRow?.max_users || 5;
+      const [countRow] = await query('SELECT COUNT(*) AS cnt FROM staff WHERE tenant_id = ? AND is_active = 1', [tenantId]);
+      const currentUsers = countRow?.cnt || 0;
+      if (currentUsers >= maxUsers) {
+        return res.status(403).json({
+          success: false,
+          message: `User limit reached. Your plan allows a maximum of ${maxUsers} team member${maxUsers !== 1 ? 's' : ''}. Please upgrade your plan to add more.`,
+        });
+      }
+    } catch (e) {
+      console.warn('Could not check max_users limit:', e.message);
     }
 
     // Validate email format if provided
